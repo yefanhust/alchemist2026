@@ -1,0 +1,134 @@
+version: '3.8'
+
+services:
+  quant-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quant-dev
+    image: quant-trading-system:latest
+    
+    # GPU 支持 - 使用所有可用 GPU
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all  # 使用所有 GPU（双卡）
+              capabilities: [gpu]
+    
+    # 环境变量
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0,1
+      - PYTHONPATH=/workspace/src
+      - TZ=Asia/Shanghai
+    
+    # 挂载卷
+    volumes:
+      # 源代码（实时同步）
+      - ../src:/workspace/src:rw
+      - ../tests:/workspace/tests:rw
+      - ../scripts:/workspace/scripts:rw
+      - ../notebooks:/workspace/notebooks:rw
+      - ../config:/workspace/config:rw
+      
+      # 数据持久化
+      - ../data:/workspace/data:rw
+      
+      # 配置文件
+      - ../.env:/workspace/.env:ro
+      - ../requirements.txt:/workspace/requirements.txt:ro
+      - ../setup.py:/workspace/setup.py:ro
+      
+      # 日志
+      - ../logs:/workspace/logs:rw
+    
+    # 端口映射
+    ports:
+      - "8888:8888"  # JupyterLab
+      - "8000:8000"  # Web 服务
+    
+    # 工作目录
+    working_dir: /workspace
+    
+    # 保持容器运行
+    tty: true
+    stdin_open: true
+    
+    # 网络
+    networks:
+      - quant-network
+    
+    # 健康检查
+    healthcheck:
+      test: ["CMD", "python", "-c", "import torch; print(torch.cuda.is_available())"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis 缓存服务（可选，用于高性能缓存）
+  redis:
+    image: redis:7-alpine
+    container_name: quant-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    networks:
+      - quant-network
+    command: redis-server --appendonly yes
+
+  # JupyterLab 服务（独立启动）
+  jupyter:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: quant-jupyter
+    
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - CUDA_VISIBLE_DEVICES=0,1
+      - PYTHONPATH=/workspace/src
+    
+    volumes:
+      - ../src:/workspace/src:rw
+      - ../notebooks:/workspace/notebooks:rw
+      - ../data:/workspace/data:rw
+      - ../config:/workspace/config:rw
+      - ../.env:/workspace/.env:ro
+    
+    ports:
+      - "8889:8888"
+    
+    working_dir: /workspace
+    
+    networks:
+      - quant-network
+    
+    command: >
+      jupyter lab 
+      --ip=0.0.0.0 
+      --port=8888 
+      --no-browser 
+      --allow-root
+      --NotebookApp.token=''
+      --NotebookApp.password=''
+    
+    profiles:
+      - jupyter  # 使用 docker-compose --profile jupyter up 启动
+
+networks:
+  quant-network:
+    driver: bridge
+
+volumes:
+  redis-data:

@@ -1,0 +1,40 @@
+# 金融交易系统默认配置
+
+# 数据库配置
+database:
+  url: "sqlite:///./data/cache/market_data.db"
+  pool_size: 5
+  echo: false
+
+# Alpha Vantage API 配置
+alphavantage:
+  # API Key 应通过环境变量设置
+  api_key: ""
+  calls_per_minute: 5
+  calls_per_day: 500
+
+# 券商配置
+broker:
+  commission_rate: 0.001    # 0.1%
+  min_commission: 1.0       # 最低 $1
+  slippage_rate: 0.0005     # 0.05%
+  short_selling_enabled: true
+
+# GPU 配置
+gpu:
+  enabled: true
+  device_ids: [0, 1]        # 双 GPU
+  memory_fraction: 0.8
+
+# 日志配置
+logging:
+  level: "INFO"
+  file: "./logs/quant_system.log"
+  rotation: "10 MB"
+  retention: "1 week"
+
+# 模拟交易配置
+initial_capital: 100000.0
+
+# 调试模式
+debug: false
