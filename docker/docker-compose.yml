@@ -21,26 +21,12 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - CUDA_VISIBLE_DEVICES=0,1
-      - PYTHONPATH=/workspace/python/alchemist2026
+      - PYTHONPATH=/workspace/python/alchemist
       - TZ=Asia/Shanghai
     
-    # 挂载卷
+    # 挂载卷 - 将项目根目录整体挂载，host 上的任何文件修改都会实时反映到容器内
     volumes:
-      # Docker Compose 的相对路径始终是相对于 docker-compose.yml 文件所在的目录
-      # Python 源代码（实时同步）
-      - ../python:/workspace/python:rw
-      - ../config:/workspace/config:rw
-      
-      # 数据持久化
-      - ../data:/workspace/data:rw
-      
-      # 配置文件
-      - ../.env:/workspace/.env:ro
-      - ../README.md:/workspace/README.md:ro
-      - ../setup.py:/workspace/setup.py:ro
-      
-      # 日志
-      - ../logs:/workspace/logs:rw
+      - ..:/workspace:rw
     
     # 端口映射
     ports:
@@ -98,10 +84,7 @@ services:
       - PYTHONPATH=/workspace/python/alchemist2026
     
     volumes:
-      - ../python:/workspace/python:rw
-      - ../data:/workspace/data:rw
-      - ../config:/workspace/config:rw
-      - ../.env:/workspace/.env:ro
+      - ..:/workspace:rw
     
     ports:
       - "8889:8888"
