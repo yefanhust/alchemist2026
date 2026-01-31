@@ -15,7 +15,7 @@ c.ServerApp.allow_origin = '*'
 
 # 目录配置
 c.ServerApp.root_dir = '/workspace'
-c.ServerApp.notebook_dir = '/workspace/notebooks'
+c.ServerApp.notebook_dir = '/workspace/python/notebooks'
 
 # 终端配置
 c.ServerApp.terminado_settings = {'shell_command': ['/bin/bash']}

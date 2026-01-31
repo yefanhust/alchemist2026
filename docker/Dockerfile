@@ -64,8 +64,8 @@ RUN pip install \
 
 # 4. 技术分析库
 RUN pip install \
-    ta-lib-bin==0.4.28 \
-    pandas-ta==0.3.14b0
+    ta-lib-bin==0.4.26 \
+    ta
 
 # 5. 可视化库
 RUN pip install \
@@ -97,6 +97,7 @@ RUN pip install \
     python-dotenv==1.0.0 \
     loguru==0.7.2 \
     rich==13.7.0 \
+    click==8.1.7 \
     typer==0.9.0
 
 # 9. 异步和并发
@@ -106,9 +107,8 @@ RUN pip install \
     joblib==1.3.2
 
 # 10. 机器学习（为后续模块预留）
-RUN pip install \
-    scikit-learn==1.3.2 \
-    torch==2.1.1 --index-url https://download.pytorch.org/whl/cu121
+RUN pip install scikit-learn==1.3.2
+RUN pip install torch==2.1.1 --index-url https://download.pytorch.org/whl/cu121
 
 # 创建非 root 用户
 RUN useradd -m -s /bin/bash developer \

@@ -2,7 +2,12 @@
 金融指标跟踪及智能交易系统
 """
 
+from pathlib import Path
 from setuptools import setup, find_packages
+
+# 读取 README（如果存在）
+readme_path = Path(__file__).parent / "README.md"
+long_description = readme_path.read_text(encoding="utf-8") if readme_path.exists() else ""
 
 setup(
     name="alchemist2026",
@@ -10,11 +15,11 @@ setup(
     author="Your Name",
     author_email="your.email@example.com",
     description="Alchemist2026 - 模块化量化交易系统，支持模拟交易、策略回测和智能分析",
-    long_description=open("README.md", encoding="utf-8").read(),
+    long_description=long_description,
     long_description_content_type="text/markdown",
     url="https://github.com/yourusername/alchemist2026",
-    package_dir={"": "src"},
-    packages=find_packages(where="src"),
+    package_dir={"": "python/alchemist2026"},
+    packages=find_packages(where="python/alchemist2026"),
     python_requires=">=3.10",
     install_requires=[
         "numpy>=1.26.0",

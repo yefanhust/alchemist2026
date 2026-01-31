@@ -21,16 +21,14 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - CUDA_VISIBLE_DEVICES=0,1
-      - PYTHONPATH=/workspace/src
+      - PYTHONPATH=/workspace/python/alchemist2026
       - TZ=Asia/Shanghai
     
     # 挂载卷
     volumes:
-      # 源代码（实时同步）
-      - ../src:/workspace/src:rw
-      - ../tests:/workspace/tests:rw
-      - ../scripts:/workspace/scripts:rw
-      - ../notebooks:/workspace/notebooks:rw
+      # Docker Compose 的相对路径始终是相对于 docker-compose.yml 文件所在的目录
+      # Python 源代码（实时同步）
+      - ../python:/workspace/python:rw
       - ../config:/workspace/config:rw
       
       # 数据持久化
@@ -38,7 +36,7 @@ services:
       
       # 配置文件
       - ../.env:/workspace/.env:ro
-      - ../requirements.txt:/workspace/requirements.txt:ro
+      - ../README.md:/workspace/README.md:ro
       - ../setup.py:/workspace/setup.py:ro
       
       # 日志
@@ -97,11 +95,10 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - CUDA_VISIBLE_DEVICES=0,1
-      - PYTHONPATH=/workspace/src
+      - PYTHONPATH=/workspace/python/alchemist2026
     
     volumes:
-      - ../src:/workspace/src:rw
-      - ../notebooks:/workspace/notebooks:rw
+      - ../python:/workspace/python:rw
       - ../data:/workspace/data:rw
       - ../config:/workspace/config:rw
       - ../.env:/workspace/.env:ro
