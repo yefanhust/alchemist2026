@@ -38,3 +38,15 @@ initial_capital: 100000.0
 
 # 调试模式
 debug: false
+
+# Web 服务配置
+web:
+  host: "0.0.0.0"
+  port: 8443  # Cloudflare 支持的 HTTPS 端口
+  debug: false
+  ssl:
+    enabled: true
+    keyfile: "/workspace/python/alchemist/web/ssl/key.pem"
+    certfile: "/workspace/python/alchemist/web/ssl/cert.pem"
+  # 域名配置
+  domain: "quant.enrichir.top"

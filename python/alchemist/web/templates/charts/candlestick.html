@@ -1,0 +1,200 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <h2><i class="bi bi-bar-chart-line"></i> K线图</h2>
+        <p class="text-muted">查看资产的 OHLCV K 线数据</p>
+    </div>
+</div>
+
+<!-- 控制面板 -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <form id="chart-form" class="row g-3 align-items-end">
+                    <div class="col-md-3">
+                        <label for="symbol-select" class="form-label">资产代码</label>
+                        <select id="symbol-select" class="form-select">
+                            <option value="">加载中...</option>
+                        </select>
+                    </div>
+                    <div class="col-md-2">
+                        <label for="interval-select" class="form-label">数据间隔</label>
+                        <select id="interval-select" class="form-select">
+                            <option value="1d" selected>日线</option>
+                            <option value="1h">小时线</option>
+                            <option value="15min">15分钟</option>
+                        </select>
+                    </div>
+                    <div class="col-md-2">
+                        <label for="start-date" class="form-label">开始日期</label>
+                        <input type="date" id="start-date" class="form-control">
+                    </div>
+                    <div class="col-md-2">
+                        <label for="end-date" class="form-label">结束日期</label>
+                        <input type="date" id="end-date" class="form-control">
+                    </div>
+                    <div class="col-md-3">
+                        <button type="submit" class="btn btn-primary w-100">
+                            <i class="bi bi-search"></i> 查询
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- K线图 -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0" id="chart-title">请选择资产</h5>
+            </div>
+            <div class="card-body">
+                <div id="candlestick-chart" style="height: 500px;"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 成交量图 -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">成交量</h5>
+            </div>
+            <div class="card-body">
+                <div id="volume-chart" style="height: 200px;"></div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// 页面加载
+document.addEventListener('DOMContentLoaded', function() {
+    loadSymbolOptions();
+
+    // 检查 URL 参数
+    const urlParams = new URLSearchParams(window.location.search);
+    const symbol = urlParams.get('symbol');
+    if (symbol) {
+        setTimeout(() => {
+            document.getElementById('symbol-select').value = symbol;
+            loadCandlestickChart();
+        }, 500);
+    }
+});
+
+// 表单提交
+document.getElementById('chart-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    loadCandlestickChart();
+});
+
+// 加载 Symbol 选项
+async function loadSymbolOptions() {
+    try {
+        const response = await fetch('/api/market/symbols');
+        const data = await response.json();
+
+        const select = document.getElementById('symbol-select');
+        select.innerHTML = '<option value="">请选择资产</option>' +
+            data.symbols.map(s => `<option value="${s.symbol}">${s.symbol}</option>`).join('');
+    } catch (error) {
+        console.error('加载 Symbol 列表失败:', error);
+    }
+}
+
+// 加载 K 线图
+async function loadCandlestickChart() {
+    const symbol = document.getElementById('symbol-select').value;
+    if (!symbol) {
+        alert('请选择资产');
+        return;
+    }
+
+    const interval = document.getElementById('interval-select').value;
+    const startDate = document.getElementById('start-date').value;
+    const endDate = document.getElementById('end-date').value;
+
+    let url = `/api/market/ohlcv/${symbol}?interval=${interval}`;
+    if (startDate) url += `&start_date=${startDate}`;
+    if (endDate) url += `&end_date=${endDate}`;
+
+    try {
+        const response = await fetch(url);
+        if (!response.ok) {
+            const error = await response.json();
+            alert(error.detail || '加载数据失败');
+            return;
+        }
+
+        const data = await response.json();
+        document.getElementById('chart-title').textContent = `${symbol} K线图 (${data.count} 条数据)`;
+
+        renderCandlestickChart(data);
+        renderVolumeChart(data);
+    } catch (error) {
+        console.error('加载图表失败:', error);
+        alert('加载图表失败: ' + error.message);
+    }
+}
+
+// 渲染 K 线图
+function renderCandlestickChart(data) {
+    const trace = {
+        type: 'candlestick',
+        x: data.data.map(d => d.timestamp),
+        open: data.data.map(d => d.open),
+        high: data.data.map(d => d.high),
+        low: data.data.map(d => d.low),
+        close: data.data.map(d => d.close),
+        increasing: { line: { color: '#26a69a' } },
+        decreasing: { line: { color: '#ef5350' } },
+        name: data.symbol
+    };
+
+    const layout = {
+        xaxis: {
+            title: '日期',
+            rangeslider: { visible: false },
+            type: 'date'
+        },
+        yaxis: { title: '价格' },
+        margin: { t: 20, b: 40, l: 60, r: 20 }
+    };
+
+    Plotly.newPlot('candlestick-chart', [trace], layout, { responsive: true });
+}
+
+// 渲染成交量图
+function renderVolumeChart(data) {
+    const colors = data.data.map(d => d.close >= d.open ? '#26a69a' : '#ef5350');
+
+    const trace = {
+        type: 'bar',
+        x: data.data.map(d => d.timestamp),
+        y: data.data.map(d => d.volume),
+        marker: { color: colors },
+        name: '成交量'
+    };
+
+    const layout = {
+        xaxis: { title: '', type: 'date' },
+        yaxis: { title: '成交量' },
+        margin: { t: 10, b: 40, l: 60, r: 20 },
+        bargap: 0.1
+    };
+
+    Plotly.newPlot('volume-chart', [trace], layout, { responsive: true });
+}
+</script>
+{% endblock %}

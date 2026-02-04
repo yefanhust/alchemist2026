@@ -1,0 +1,236 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <h2><i class="bi bi-diagram-3"></i> 多资产对比</h2>
+        <p class="text-muted">对比多个资产的收益率走势</p>
+    </div>
+</div>
+
+<!-- 控制面板 -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <form id="comparison-form" class="row g-3 align-items-end">
+                    <div class="col-md-4">
+                        <label class="form-label">选择资产 (可多选)</label>
+                        <div id="symbol-checkboxes" class="d-flex flex-wrap gap-2">
+                            <span class="text-muted">加载中...</span>
+                        </div>
+                    </div>
+                    <div class="col-md-2">
+                        <label for="start-date" class="form-label">开始日期</label>
+                        <input type="date" id="start-date" class="form-control">
+                    </div>
+                    <div class="col-md-2">
+                        <label for="end-date" class="form-label">结束日期</label>
+                        <input type="date" id="end-date" class="form-control">
+                    </div>
+                    <div class="col-md-2">
+                        <label for="chart-type" class="form-label">图表类型</label>
+                        <select id="chart-type" class="form-select">
+                            <option value="returns" selected>归一化收益率</option>
+                            <option value="price">价格走势</option>
+                        </select>
+                    </div>
+                    <div class="col-md-2">
+                        <button type="submit" class="btn btn-primary w-100">
+                            <i class="bi bi-search"></i> 对比
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 对比图 -->
+<div class="row mb-4">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0" id="chart-title">请选择资产进行对比</h5>
+            </div>
+            <div class="card-body">
+                <div id="comparison-chart" style="height: 500px;"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 统计表格 -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header">
+                <h5 class="mb-0">统计数据</h5>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover" id="stats-table">
+                        <thead>
+                            <tr>
+                                <th>资产</th>
+                                <th>起始价格</th>
+                                <th>最新价格</th>
+                                <th>收益率</th>
+                                <th>最高价</th>
+                                <th>最低价</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td colspan="6" class="text-center text-muted">请选择资产进行对比</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// 页面加载
+document.addEventListener('DOMContentLoaded', function() {
+    loadSymbolCheckboxes();
+});
+
+// 表单提交
+document.getElementById('comparison-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    loadComparisonChart();
+});
+
+// 加载 Symbol 复选框
+async function loadSymbolCheckboxes() {
+    try {
+        const response = await fetch('/api/market/symbols');
+        const data = await response.json();
+
+        const container = document.getElementById('symbol-checkboxes');
+        container.innerHTML = data.symbols.map(s => `
+            <div class="form-check">
+                <input class="form-check-input symbol-checkbox" type="checkbox" value="${s.symbol}" id="check-${s.symbol}">
+                <label class="form-check-label" for="check-${s.symbol}">${s.symbol}</label>
+            </div>
+        `).join('');
+    } catch (error) {
+        console.error('加载 Symbol 列表失败:', error);
+    }
+}
+
+// 获取选中的 Symbol
+function getSelectedSymbols() {
+    const checkboxes = document.querySelectorAll('.symbol-checkbox:checked');
+    return Array.from(checkboxes).map(cb => cb.value);
+}
+
+// 加载对比图
+async function loadComparisonChart() {
+    const symbols = getSelectedSymbols();
+    if (symbols.length < 1) {
+        alert('请至少选择一个资产');
+        return;
+    }
+
+    const startDate = document.getElementById('start-date').value;
+    const endDate = document.getElementById('end-date').value;
+    const chartType = document.getElementById('chart-type').value;
+
+    const traces = [];
+    const statsData = [];
+
+    for (const symbol of symbols) {
+        let url = `/api/market/ohlcv/${symbol}?interval=1d`;
+        if (startDate) url += `&start_date=${startDate}`;
+        if (endDate) url += `&end_date=${endDate}`;
+
+        try {
+            const response = await fetch(url);
+            if (!response.ok) continue;
+
+            const data = await response.json();
+            if (data.data.length === 0) continue;
+
+            const basePrice = data.data[0].close;
+            const latestPrice = data.data[data.data.length - 1].close;
+            const returns = ((latestPrice - basePrice) / basePrice * 100).toFixed(2);
+
+            // 计算统计数据
+            const highs = data.data.map(d => d.high);
+            const lows = data.data.map(d => d.low);
+
+            statsData.push({
+                symbol: symbol,
+                startPrice: basePrice.toFixed(2),
+                endPrice: latestPrice.toFixed(2),
+                returns: returns,
+                high: Math.max(...highs).toFixed(2),
+                low: Math.min(...lows).toFixed(2)
+            });
+
+            // 生成图表数据
+            let yData;
+            if (chartType === 'returns') {
+                yData = data.data.map(d => ((d.close - basePrice) / basePrice) * 100);
+            } else {
+                yData = data.data.map(d => d.close);
+            }
+
+            traces.push({
+                type: 'scatter',
+                mode: 'lines',
+                x: data.data.map(d => d.timestamp),
+                y: yData,
+                name: symbol
+            });
+        } catch (error) {
+            console.error(`加载 ${symbol} 数据失败:`, error);
+        }
+    }
+
+    if (traces.length === 0) {
+        alert('没有可用的数据');
+        return;
+    }
+
+    // 更新标题
+    document.getElementById('chart-title').textContent =
+        `${symbols.join(' vs ')} ${chartType === 'returns' ? '收益率' : '价格'}对比`;
+
+    // 渲染图表
+    const layout = {
+        xaxis: { title: '日期', type: 'date' },
+        yaxis: {
+            title: chartType === 'returns' ? '收益率 (%)' : '价格',
+            ticksuffix: chartType === 'returns' ? '%' : ''
+        },
+        legend: { orientation: 'h', y: -0.15 },
+        margin: { t: 20, b: 60, l: 60, r: 20 },
+        hovermode: 'x unified'
+    };
+
+    Plotly.newPlot('comparison-chart', traces, layout, { responsive: true });
+
+    // 更新统计表格
+    const tbody = document.querySelector('#stats-table tbody');
+    tbody.innerHTML = statsData.map(s => `
+        <tr>
+            <td><strong>${s.symbol}</strong></td>
+            <td>$${s.startPrice}</td>
+            <td>$${s.endPrice}</td>
+            <td class="${parseFloat(s.returns) >= 0 ? 'text-success' : 'text-danger'}">
+                ${s.returns}%
+            </td>
+            <td>$${s.high}</td>
+            <td>$${s.low}</td>
+        </tr>
+    `).join('');
+}
+</script>
+{% endblock %}

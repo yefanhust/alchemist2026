@@ -1,0 +1,3 @@
+# SSL 证书目录
+# 运行 /workspace/scripts/generate_ssl.sh 生成证书
+# 生成的 .pem 文件会被 .gitignore 忽略

@@ -7,7 +7,8 @@ import asyncio
 import os
 import sys
 from datetime import datetime, timedelta
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, List, Optional
+
 import aiohttp
 from loguru import logger
 
@@ -27,9 +28,10 @@ async def _countdown_sleep(total_seconds: float, reason: str = "API 限流") -> 
     sys.stderr.write(f"\r\u2705 {reason} | {bar} | done       \n")
     sys.stderr.flush()
 
-from data.providers import DataProvider, DataInterval
-from data.models import MarketData, OHLCV
+
 from data.cache.base import CacheBackend
+from data.models import OHLCV, MarketData
+from data.providers import DataInterval, DataProvider
 
 
 class RateLimiter:
@@ -52,17 +54,17 @@ class RateLimiter:
         calls_per_day: int = 0,
     ):
         if calls_per_second > 0:
-            self.window_size = 1.0      # 秒
+            self.window_size = 1.0  # 秒
             self.max_calls = calls_per_second
         elif calls_per_minute > 0:
-            self.window_size = 60.0     # 秒
+            self.window_size = 60.0  # 秒
             self.max_calls = calls_per_minute
         else:
             self.window_size = 0.0
             self.max_calls = 0
 
         self.calls_per_day = calls_per_day  # 0 = 不限制
-        self.call_times: List[float] = []   # unix timestamps
+        self.call_times: List[float] = []  # unix timestamps
         self.daily_call_count: int = 0
         self._daily_reset_date: str = ""
         self._lock = asyncio.Lock()
@@ -79,13 +81,8 @@ class RateLimiter:
                 self.daily_call_count = 0
 
             if self.calls_per_day > 0 and self.daily_call_count >= self.calls_per_day:
-                logger.error(
-                    f"已达每日 API 调用上限 ({self.calls_per_day} 次)，"
-                    "请明天再试或升级 API plan"
-                )
-                raise Exception(
-                    f"已达每日 API 调用上限 ({self.calls_per_day} 次)"
-                )
+                logger.error(f"已达每日 API 调用上限 ({self.calls_per_day} 次)，" "请明天再试或升级 API plan")
+                raise Exception(f"已达每日 API 调用上限 ({self.calls_per_day} 次)")
 
             # ---------- 滑动窗口限额 ----------
             if self.max_calls > 0:
@@ -108,13 +105,13 @@ class RateLimiter:
 class AlphaVantageProvider(DataProvider):
     """
     Alpha Vantage 数据提供者
-    
+
     使用 Alpha Vantage API 获取股票、ETF 等市场数据。
     支持日线、周线、月线及分钟数据。
-    
+
     API 文档: https://www.alphavantage.co/documentation/
     """
-    
+
     BASE_URL = "https://www.alphavantage.co/query"
 
     # Alpha Vantage 不支持的交易所后缀
@@ -135,8 +132,8 @@ class AlphaVantageProvider(DataProvider):
 
     # Plan 预设: {plan_name: (calls_per_second, calls_per_minute, calls_per_day)}
     PLAN_PRESETS: Dict[str, tuple] = {
-        "free":    (1, 0, 25),    # 1 次/秒, 25 次/天
-        "premium": (0, 75, 0),    # 75 次/分钟, 无每日上限
+        "free": (1, 0, 25),  # 1 次/秒, 25 次/天
+        "premium": (0, 75, 0),  # 75 次/分钟, 无每日上限
     }
 
     # 类级别共享限流器，按 API key 隔离。
@@ -166,20 +163,14 @@ class AlphaVantageProvider(DataProvider):
 
         self.api_key = api_key or os.getenv("ALPHAVANTAGE_API_KEY")
         if not self.api_key:
-            raise ValueError(
-                "Alpha Vantage API key 未设置。"
-                "请通过参数传入或设置环境变量 ALPHAVANTAGE_API_KEY"
-            )
+            raise ValueError("Alpha Vantage API key 未设置。" "请通过参数传入或设置环境变量 ALPHAVANTAGE_API_KEY")
 
         if plan is None:
             plan = os.getenv("ALPHAVANTAGE_PLAN", "free").lower()
 
         preset = self.PLAN_PRESETS.get(plan)
         if preset is None:
-            raise ValueError(
-                f"未知的 Alpha Vantage plan: '{plan}'，"
-                f"可选值: {', '.join(self.PLAN_PRESETS.keys())}"
-            )
+            raise ValueError(f"未知的 Alpha Vantage plan: '{plan}'，" f"可选值: {', '.join(self.PLAN_PRESETS.keys())}")
 
         calls_per_second, calls_per_minute, calls_per_day = preset
         self.plan = plan
@@ -200,29 +191,27 @@ class AlphaVantageProvider(DataProvider):
         self.rate_limiter = self._rate_limiters[self.api_key]
 
         self._session: Optional[aiohttp.ClientSession] = None
-    
+
     @property
     def name(self) -> str:
         return "alphavantage"
-    
+
     @property
     def supported_intervals(self) -> List[DataInterval]:
         return list(self.INTERVAL_MAP.keys())
-    
+
     async def _get_session(self) -> aiohttp.ClientSession:
         """获取或创建 HTTP 会话"""
         if self._session is None or self._session.closed:
             self._session = aiohttp.ClientSession()
         return self._session
-    
+
     async def close(self) -> None:
         """关闭 HTTP 会话"""
         if self._session and not self._session.closed:
             await self._session.close()
-    
-    async def _make_request(
-        self, params: Dict[str, str], max_retries: int = 3
-    ) -> Dict[str, Any]:
+
+    async def _make_request(self, params: Dict[str, str], max_retries: int = 3) -> Dict[str, Any]:
         """
         发送 API 请求（含限流重试）
 
@@ -262,8 +251,7 @@ class AlphaVantageProvider(DataProvider):
                             rl = self.rate_limiter
                             wait_time = rl.window_size / max(rl.max_calls, 1) + 1
                             logger.warning(
-                                f"API 限流，{wait_time:.0f}秒后重试 "
-                                f"({attempt + 1}/{max_retries}): {rate_limit_msg}"
+                                f"API 限流，{wait_time:.0f}秒后重试 " f"({attempt + 1}/{max_retries}): {rate_limit_msg}"
                             )
                             if wait_time >= 1.0:
                                 await _countdown_sleep(
@@ -285,7 +273,7 @@ class AlphaVantageProvider(DataProvider):
 
         # 不应到达此处
         raise Exception("API 请求失败: 超过最大重试次数")
-    
+
     async def get_historical_data(
         self,
         symbol: str,
@@ -295,13 +283,13 @@ class AlphaVantageProvider(DataProvider):
     ) -> MarketData:
         """
         获取历史数据
-        
+
         Args:
             symbol: 资产代码
             start_date: 开始日期
             end_date: 结束日期
             interval: 数据间隔
-            
+
         Returns:
             MarketData 对象
         """
@@ -320,37 +308,35 @@ class AlphaVantageProvider(DataProvider):
 
         # 生成缓存键
         cache_key = self._generate_cache_key(symbol, start_date, end_date, interval)
-        
+
         # 尝试从缓存获取
         if self.cache:
             cached_data = await self.cache.get(cache_key)
             if cached_data is not None:
                 logger.debug(f"从缓存获取 {symbol} 数据")
                 return cached_data
-        
+
         # 从 API 获取数据
         logger.info(f"从 Alpha Vantage 获取 {symbol} 数据")
-        
+
         func, av_interval = self.INTERVAL_MAP[interval]
-        
+
         params = {
             "function": func,
             "symbol": symbol,
             "outputsize": "full",  # 获取完整数据
         }
-        
+
         if av_interval:
             params["interval"] = av_interval
-        
+
         try:
             data = await self._make_request(params)
         except Exception as e:
             # 部分 _ADJUSTED 接口对非美股可能不可用，回退到非 adjusted 版本
             if "Invalid API call" in str(e) and func.endswith("_ADJUSTED"):
                 fallback_func = func.replace("_ADJUSTED", "")
-                logger.warning(
-                    f"{func} 不支持 {symbol}，回退到 {fallback_func}"
-                )
+                logger.warning(f"{func} 不支持 {symbol}，回退到 {fallback_func}")
                 params["function"] = fallback_func
                 data = await self._make_request(params)
             else:
@@ -358,16 +344,16 @@ class AlphaVantageProvider(DataProvider):
 
         # 解析数据
         market_data = self._parse_response(symbol, data, interval)
-        
+
         # 过滤日期范围
         market_data = market_data.slice(start_date, end_date)
-        
+
         # 保存到缓存
         if self.cache and not market_data.is_empty:
             await self.cache.set(cache_key, market_data)
-        
+
         return market_data
-    
+
     def _parse_response(
         self,
         symbol: str,
@@ -376,12 +362,12 @@ class AlphaVantageProvider(DataProvider):
     ) -> MarketData:
         """
         解析 API 响应
-        
+
         Args:
             symbol: 资产代码
             data: API 响应数据
             interval: 数据间隔
-            
+
         Returns:
             MarketData 对象
         """
@@ -391,14 +377,14 @@ class AlphaVantageProvider(DataProvider):
             if "Time Series" in key:
                 time_series_key = key
                 break
-        
+
         if not time_series_key:
             logger.warning(f"响应中未找到时间序列数据: {list(data.keys())}")
             return MarketData(symbol=symbol)
-        
+
         time_series = data[time_series_key]
         ohlcv_list = []
-        
+
         for timestamp_str, values in time_series.items():
             try:
                 # 解析时间戳
@@ -406,7 +392,7 @@ class AlphaVantageProvider(DataProvider):
                     timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d %H:%M:%S")
                 else:
                     timestamp = datetime.strptime(timestamp_str, "%Y-%m-%d")
-                
+
                 # 解析 OHLCV 数据
                 ohlcv = OHLCV(
                     timestamp=timestamp,
@@ -418,27 +404,27 @@ class AlphaVantageProvider(DataProvider):
                     adjusted_close=float(values.get("5. adjusted close", values.get("4. close", 0))),
                 )
                 ohlcv_list.append(ohlcv)
-                
+
             except (ValueError, KeyError) as e:
                 logger.warning(f"解析数据点失败: {timestamp_str}, {e}")
                 continue
-        
+
         # 按时间排序
         ohlcv_list.sort(key=lambda x: x.timestamp)
-        
+
         return MarketData(
             symbol=symbol,
             data=ohlcv_list,
             metadata={"source": "alphavantage", "interval": interval.value},
         )
-    
+
     async def get_latest_price(self, symbol: str) -> Optional[float]:
         """
         获取最新价格
-        
+
         Args:
             symbol: 资产代码
-            
+
         Returns:
             最新价格
         """
@@ -446,14 +432,14 @@ class AlphaVantageProvider(DataProvider):
         if quote:
             return quote.get("price")
         return None
-    
+
     async def get_quote(self, symbol: str) -> Optional[Dict[str, Any]]:
         """
         获取实时报价
-        
+
         Args:
             symbol: 资产代码
-            
+
         Returns:
             报价信息
         """
@@ -462,22 +448,20 @@ class AlphaVantageProvider(DataProvider):
         # 检查是否为不支持的交易所
         for suffix in self.UNSUPPORTED_EXCHANGES:
             if symbol.endswith(suffix.upper()):
-                logger.warning(
-                    f"Alpha Vantage 不支持交易所后缀 '{suffix}'（symbol={symbol}）"
-                )
+                logger.warning(f"Alpha Vantage 不支持交易所后缀 '{suffix}'（symbol={symbol}）")
                 return None
 
         params = {
             "function": "GLOBAL_QUOTE",
             "symbol": symbol,
         }
-        
+
         data = await self._make_request(params)
-        
+
         global_quote = data.get("Global Quote", {})
         if not global_quote:
             return None
-        
+
         return {
             "symbol": global_quote.get("01. symbol"),
             "open": float(global_quote.get("02. open", 0)),
@@ -490,14 +474,14 @@ class AlphaVantageProvider(DataProvider):
             "change": float(global_quote.get("09. change", 0)),
             "change_percent": global_quote.get("10. change percent", "0%").replace("%", ""),
         }
-    
+
     async def search_symbols(self, keywords: str) -> List[Dict[str, Any]]:
         """
         搜索资产代码
-        
+
         Args:
             keywords: 搜索关键词
-            
+
         Returns:
             匹配的资产列表
         """
@@ -505,11 +489,11 @@ class AlphaVantageProvider(DataProvider):
             "function": "SYMBOL_SEARCH",
             "keywords": keywords,
         }
-        
+
         data = await self._make_request(params)
-        
+
         matches = data.get("bestMatches", [])
-        
+
         return [
             {
                 "symbol": m.get("1. symbol"),
@@ -520,6 +504,6 @@ class AlphaVantageProvider(DataProvider):
             }
             for m in matches
         ]
-    
+
     def __repr__(self):
         return f"AlphaVantageProvider(api_key=***)"

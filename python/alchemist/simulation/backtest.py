@@ -340,27 +340,19 @@ class Backtester:
         # 交易统计
         fills = broker.fill_history
         total_trades = len(fills)
-        
-        # 计算每笔交易的盈亏（简化版本）
-        trade_pnls = []
-        for i in range(0, len(fills) - 1, 2):  # 假设买卖配对
-            if i + 1 < len(fills):
-                buy_fill = fills[i]
-                sell_fill = fills[i + 1]
-                if buy_fill["side"] == "buy" and sell_fill["side"] == "sell":
-                    pnl = (sell_fill["price"] - buy_fill["price"]) * buy_fill["quantity"]
-                    pnl -= buy_fill["commission"] + sell_fill["commission"]
-                    trade_pnls.append(pnl)
-        
+
+        # 按 symbol 分组计算完整交易的盈亏
+        trade_pnls = self._calculate_trade_pnls(fills)
+
         winning_trades = sum(1 for pnl in trade_pnls if pnl > 0)
         losing_trades = sum(1 for pnl in trade_pnls if pnl < 0)
         win_rate = winning_trades / len(trade_pnls) if trade_pnls else 0
-        
+
         wins = [pnl for pnl in trade_pnls if pnl > 0]
         losses = [pnl for pnl in trade_pnls if pnl < 0]
         avg_win = np.mean(wins) if wins else 0
         avg_loss = abs(np.mean(losses)) if losses else 0
-        
+
         total_wins = sum(wins)
         total_losses = abs(sum(losses))
         profit_factor = total_wins / total_losses if total_losses > 0 else 0
@@ -399,6 +391,92 @@ class Backtester:
             monthly_returns=monthly_returns,
         )
     
+    def _calculate_trade_pnls(self, fills: List[Dict[str, Any]]) -> List[float]:
+        """
+        按 symbol 分组计算完整交易的盈亏
+
+        一次完整交易定义为：从开仓到平仓的过程。
+        支持多头（买入后卖出）和空头（卖出后买入）。
+
+        Args:
+            fills: 成交记录列表
+
+        Returns:
+            每笔完整交易的盈亏列表
+        """
+        from collections import defaultdict
+
+        # 按 symbol 分组
+        symbol_fills = defaultdict(list)
+        for fill in fills:
+            symbol_fills[fill["symbol"]].append(fill)
+
+        trade_pnls = []
+
+        for symbol, symbol_fill_list in symbol_fills.items():
+            # 按时间排序
+            sorted_fills = sorted(symbol_fill_list, key=lambda x: x["timestamp"])
+
+            # 跟踪当前持仓
+            position_qty = 0.0
+            position_cost = 0.0  # 总成本
+            total_commission = 0.0
+
+            for fill in sorted_fills:
+                qty = fill["quantity"]
+                price = fill["price"]
+                commission = fill["commission"]
+                total_commission += commission
+
+                if fill["side"] == "buy":
+                    if position_qty >= 0:
+                        # 加多仓
+                        position_cost += qty * price
+                        position_qty += qty
+                    else:
+                        # 平空仓
+                        close_qty = min(qty, abs(position_qty))
+                        # 空头盈亏 = (开仓价 - 平仓价) * 数量
+                        avg_open_price = position_cost / abs(position_qty) if position_qty != 0 else 0
+                        pnl = (avg_open_price - price) * close_qty - total_commission
+                        if close_qty == abs(position_qty):
+                            # 完全平仓
+                            trade_pnls.append(pnl)
+                            total_commission = 0.0
+                        position_qty += close_qty
+                        position_cost = position_cost * (1 - close_qty / (close_qty + abs(position_qty - close_qty))) if position_qty - close_qty != 0 else 0
+
+                        # 如果还有剩余买入量，开多仓
+                        remaining = qty - close_qty
+                        if remaining > 0:
+                            position_qty = remaining
+                            position_cost = remaining * price
+                else:  # sell
+                    if position_qty <= 0:
+                        # 加空仓
+                        position_cost += qty * price
+                        position_qty -= qty
+                    else:
+                        # 平多仓
+                        close_qty = min(qty, position_qty)
+                        # 多头盈亏 = (平仓价 - 开仓价) * 数量
+                        avg_open_price = position_cost / position_qty if position_qty != 0 else 0
+                        pnl = (price - avg_open_price) * close_qty - total_commission
+                        if close_qty == position_qty:
+                            # 完全平仓
+                            trade_pnls.append(pnl)
+                            total_commission = 0.0
+                        position_qty -= close_qty
+                        position_cost = position_cost * (1 - close_qty / (close_qty + position_qty)) if position_qty > 0 else 0
+
+                        # 如果还有剩余卖出量，开空仓
+                        remaining = qty - close_qty
+                        if remaining > 0:
+                            position_qty = -remaining
+                            position_cost = remaining * price
+
+        return trade_pnls
+
     def _calculate_max_drawdown_duration(self, drawdown: pd.Series) -> int:
         """计算最大回撤持续时间"""
         is_underwater = drawdown < 0

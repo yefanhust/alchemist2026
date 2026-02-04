@@ -1,0 +1,160 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row mb-4">
+    <div class="col-12">
+        <h2><i class="bi bi-speedometer2"></i> 数据仪表盘</h2>
+        <p class="text-muted">缓存数据概览和系统状态</p>
+    </div>
+</div>
+
+<!-- 统计卡片 -->
+<div class="row mb-4" id="stats-cards">
+    <div class="col-md-3 mb-3">
+        <div class="card bg-primary text-white h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <h6 class="card-subtitle mb-2">缓存条目</h6>
+                        <h2 class="card-title mb-0" id="total-entries">-</h2>
+                    </div>
+                    <i class="bi bi-database fs-1 opacity-50"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 mb-3">
+        <div class="card bg-success text-white h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <h6 class="card-subtitle mb-2">市场数据</h6>
+                        <h2 class="card-title mb-0" id="market-entries">-</h2>
+                    </div>
+                    <i class="bi bi-bar-chart-line fs-1 opacity-50"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 mb-3">
+        <div class="card bg-info text-white h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <h6 class="card-subtitle mb-2">资产数量</h6>
+                        <h2 class="card-title mb-0" id="unique-symbols">-</h2>
+                    </div>
+                    <i class="bi bi-currency-exchange fs-1 opacity-50"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-3 mb-3">
+        <div class="card bg-secondary text-white h-100">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <h6 class="card-subtitle mb-2">数据库大小</h6>
+                        <h2 class="card-title mb-0" id="db-size">-</h2>
+                    </div>
+                    <i class="bi bi-hdd fs-1 opacity-50"></i>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- Symbol 列表 -->
+<div class="row">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header d-flex justify-content-between align-items-center">
+                <h5 class="mb-0"><i class="bi bi-list-ul"></i> 缓存资产列表</h5>
+                <button class="btn btn-sm btn-outline-primary" onclick="loadSymbols()">
+                    <i class="bi bi-arrow-clockwise"></i> 刷新
+                </button>
+            </div>
+            <div class="card-body">
+                <div class="table-responsive">
+                    <table class="table table-hover" id="symbols-table">
+                        <thead>
+                            <tr>
+                                <th>资产代码</th>
+                                <th>数据间隔</th>
+                                <th>数据条数</th>
+                                <th>开始日期</th>
+                                <th>结束日期</th>
+                                <th>操作</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td colspan="6" class="text-center text-muted">加载中...</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// 页面加载时获取数据
+document.addEventListener('DOMContentLoaded', function() {
+    loadStats();
+    loadSymbols();
+});
+
+// 加载缓存统计
+async function loadStats() {
+    try {
+        const response = await fetch('/api/cache/stats');
+        const data = await response.json();
+
+        document.getElementById('total-entries').textContent = data.total_entries;
+        document.getElementById('market-entries').textContent = data.market_data_entries;
+        document.getElementById('unique-symbols').textContent = data.unique_symbols;
+        document.getElementById('db-size').textContent = data.db_size_mb + ' MB';
+    } catch (error) {
+        console.error('加载统计失败:', error);
+    }
+}
+
+// 加载 Symbol 列表
+async function loadSymbols() {
+    try {
+        const response = await fetch('/api/market/symbols');
+        const data = await response.json();
+
+        const tbody = document.querySelector('#symbols-table tbody');
+
+        if (data.symbols.length === 0) {
+            tbody.innerHTML = '<tr><td colspan="6" class="text-center text-muted">暂无数据</td></tr>';
+            return;
+        }
+
+        tbody.innerHTML = data.symbols.map(symbol => `
+            <tr>
+                <td><strong>${symbol.symbol}</strong></td>
+                <td><span class="badge bg-secondary">${symbol.interval}</span></td>
+                <td>${symbol.count}</td>
+                <td>${symbol.start_date ? symbol.start_date.split('T')[0] : '-'}</td>
+                <td>${symbol.end_date ? symbol.end_date.split('T')[0] : '-'}</td>
+                <td>
+                    <a href="/chart/candlestick?symbol=${symbol.symbol}" class="btn btn-sm btn-primary">
+                        <i class="bi bi-bar-chart-line"></i> K线图
+                    </a>
+                </td>
+            </tr>
+        `).join('');
+    } catch (error) {
+        console.error('加载 Symbol 列表失败:', error);
+        document.querySelector('#symbols-table tbody').innerHTML =
+            '<tr><td colspan="6" class="text-center text-danger">加载失败</td></tr>';
+    }
+}
+</script>
+{% endblock %}

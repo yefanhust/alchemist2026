@@ -3,8 +3,11 @@
 回测运行脚本
 
 使用方法:
-    python scripts/run_backtest.py --strategy sma_crossover --symbol AAPL
-    python scripts/run_backtest.py --strategy mean_reversion --symbol AAPL MSFT GOOGL
+    python scripts/run_backtest.py backtest --strategy sma_crossover --symbol AAPL
+    python scripts/run_backtest.py backtest --strategy mean_reversion --symbol AAPL,MSFT,GOOGL
+    python scripts/run_backtest.py backtest --strategy mean_reversion -sym AAPL -sym MSFT -sym GOOGL
+    python scripts/run_backtest.py list-strategies
+    python scripts/run_backtest.py check-gpu
 """
 
 import asyncio
@@ -41,6 +44,15 @@ STRATEGIES = {
     "sma_crossover": SMACrossoverStrategy,
     "mean_reversion": MeanReversionStrategy,
 }
+
+
+def parse_symbols(values: List[str]) -> List[str]:
+    """Parse symbols from comma-separated or multiple flag values."""
+    result = []
+    for value in values:
+        # Split by comma and strip whitespace
+        result.extend(s.strip() for s in value.split(",") if s.strip())
+    return result
 
 
 def create_strategy(
@@ -125,7 +137,7 @@ def display_result(result: BacktestResult):
 @app.command()
 def backtest(
     strategy: str = typer.Option("sma_crossover", "--strategy", "-s", help="策略名称"),
-    symbols: List[str] = typer.Option(["AAPL"], "--symbol", "-sym", help="股票代码"),
+    symbols: List[str] = typer.Option(["AAPL"], "--symbol", "-sym", help="股票代码 (逗号分隔或多次使用 -sym)"),
     start: str = typer.Option(None, "--start", help="开始日期 (YYYY-MM-DD)"),
     end: str = typer.Option(None, "--end", help="结束日期 (YYYY-MM-DD)"),
     capital: float = typer.Option(100000.0, "--capital", "-c", help="初始资金"),
@@ -137,6 +149,9 @@ def backtest(
     """
     运行策略回测
     """
+    # 解析股票代码（支持逗号分隔）
+    symbols = parse_symbols(symbols)
+
     # 设置日志
     log_level = "DEBUG" if verbose else "INFO"
     setup_logger(level=log_level)

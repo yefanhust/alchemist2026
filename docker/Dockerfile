@@ -110,6 +110,12 @@ RUN pip install \
 RUN pip install scikit-learn==1.3.2
 RUN pip install torch==2.1.1 --index-url https://download.pytorch.org/whl/cu121
 
+# 11. Web 框架
+RUN pip install \
+    fastapi==0.109.0 \
+    uvicorn[standard]==0.27.0 \
+    python-multipart==0.0.6
+
 # 创建非 root 用户
 RUN useradd -m -s /bin/bash developer \
     && chown -R developer:developer /workspace

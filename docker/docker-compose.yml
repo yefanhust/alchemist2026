@@ -31,7 +31,7 @@ services:
     # 端口映射
     ports:
       - "8888:8888"  # JupyterLab
-      - "8000:8000"  # Web 服务
+      - "8443:8443"  # Web 服务 (HTTPS, Cloudflare 支持)
     
     # 工作目录
     working_dir: /workspace
@@ -81,7 +81,7 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - CUDA_VISIBLE_DEVICES=0,1
-      - PYTHONPATH=/workspace/python/alchemist2026
+      - PYTHONPATH=/workspace/python/alchemist
     
     volumes:
       - ..:/workspace:rw

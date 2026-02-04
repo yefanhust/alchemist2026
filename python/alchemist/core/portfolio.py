@@ -182,18 +182,37 @@ class Portfolio:
     def positions_value(self, prices: Dict[str, float]) -> float:
         """
         计算持仓市值
-        
+
         Args:
             prices: 当前价格字典 {symbol: price}
-            
+
         Returns:
-            总持仓市值
+            总持仓市值（多头为正，空头为负表示负债）
         """
         total = 0.0
         for symbol, position in self.positions.items():
             if not position.is_flat:
                 price = prices.get(symbol, position.avg_cost)
+                # 多头: quantity > 0, 市值为正
+                # 空头: quantity < 0, 市值为负（表示需要买回的负债）
                 total += position.quantity * price
+        return total
+
+    def positions_market_value(self, prices: Dict[str, float]) -> float:
+        """
+        计算持仓的绝对市值（用于风险计算）
+
+        Args:
+            prices: 当前价格字典 {symbol: price}
+
+        Returns:
+            总持仓绝对市值
+        """
+        total = 0.0
+        for symbol, position in self.positions.items():
+            if not position.is_flat:
+                price = prices.get(symbol, position.avg_cost)
+                total += abs(position.quantity) * price
         return total
     
     def total_value(self, prices: Dict[str, float]) -> float:
