@@ -9,6 +9,12 @@ from web.schemas.market import (
     SymbolInfo,
     SymbolListResponse,
 )
+from web.schemas.gold_backtest import (
+    FactorScores,
+    DailySignalPoint,
+    PricePoint,
+    GoldBacktestResponse,
+)
 
 __all__ = [
     "CacheStatsResponse",
@@ -16,4 +22,8 @@ __all__ = [
     "OHLCVResponse",
     "SymbolInfo",
     "SymbolListResponse",
+    "FactorScores",
+    "DailySignalPoint",
+    "PricePoint",
+    "GoldBacktestResponse",
 ]

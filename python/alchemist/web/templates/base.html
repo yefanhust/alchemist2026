@@ -41,11 +41,21 @@
                             <i class="bi bi-diagram-3"></i> 多资产对比
                         </a>
                     </li>
+                    <li class="nav-item">
+                        <a class="nav-link {% if request.url.path == '/chart/gold-backtest' %}active{% endif %}" href="/chart/gold-backtest">
+                            <i class="bi bi-trophy"></i> 黄金回测
+                        </a>
+                    </li>
                 </ul>
                 <ul class="navbar-nav ms-auto">
                     <li class="nav-item">
                         <a class="nav-link" href="/docs" target="_blank">
                             <i class="bi bi-file-code"></i> API 文档
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a class="nav-link text-warning" href="/logout">
+                            <i class="bi bi-box-arrow-right"></i> 退出
                         </a>
                     </li>
                 </ul>

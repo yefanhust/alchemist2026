@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录 - Alchemist2026</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.2/font/bootstrap-icons.min.css">
+    <style>
+        body {
+            background-color: #1a1a2e;
+            min-height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .login-card {
+            background: #16213e;
+            border: 1px solid #0f3460;
+            border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+            max-width: 420px;
+            width: 100%;
+        }
+        .login-card .card-header {
+            background: transparent;
+            border-bottom: 1px solid #0f3460;
+            text-align: center;
+            padding: 2rem 2rem 1rem;
+        }
+        .login-card .card-body {
+            padding: 2rem;
+        }
+        .login-card .brand-icon {
+            font-size: 2.5rem;
+            color: #e94560;
+        }
+        .login-card h4 {
+            color: #eee;
+            margin-top: 0.5rem;
+        }
+        .form-control {
+            background-color: #1a1a2e;
+            border: 1px solid #0f3460;
+            color: #eee;
+        }
+        .form-control:focus {
+            background-color: #1a1a2e;
+            border-color: #e94560;
+            color: #eee;
+            box-shadow: 0 0 0 0.2rem rgba(233, 69, 96, 0.25);
+        }
+        .btn-login {
+            background-color: #e94560;
+            border-color: #e94560;
+            color: #fff;
+            width: 100%;
+            padding: 0.6rem;
+            font-size: 1.1rem;
+        }
+        .btn-login:hover {
+            background-color: #c73652;
+            border-color: #c73652;
+            color: #fff;
+        }
+        .alert {
+            font-size: 0.9rem;
+        }
+    </style>
+</head>
+<body>
+    <div class="login-card card">
+        <div class="card-header">
+            <i class="bi bi-graph-up-arrow brand-icon"></i>
+            <h4>Alchemist2026</h4>
+            <small class="text-muted">量化交易系统</small>
+        </div>
+        <div class="card-body">
+            {% if error %}
+            <div class="alert alert-danger d-flex align-items-center" role="alert">
+                <i class="bi bi-exclamation-triangle-fill me-2"></i>
+                <div>{{ error }}</div>
+            </div>
+            {% endif %}
+
+            {% if banned %}
+            <div class="alert alert-warning d-flex align-items-center" role="alert">
+                <i class="bi bi-shield-lock-fill me-2"></i>
+                <div>IP 已被临时封禁，剩余 {{ ban_remaining }} 分钟</div>
+            </div>
+            {% else %}
+            <form method="POST" action="/login">
+                <div class="mb-3">
+                    <label for="password" class="form-label text-muted">
+                        <i class="bi bi-lock"></i> 访问密码
+                    </label>
+                    <input type="password" class="form-control" id="password"
+                           name="password" placeholder="请输入密码" autofocus required>
+                </div>
+                {% if fail_count > 0 %}
+                <div class="text-warning mb-3" style="font-size: 0.85rem;">
+                    <i class="bi bi-info-circle"></i>
+                    已失败 {{ fail_count }} 次，{{ next_ban_at }} 次后将被临时封禁
+                </div>
+                {% endif %}
+                <button type="submit" class="btn btn-login">
+                    <i class="bi bi-box-arrow-in-right"></i> 登录
+                </button>
+            </form>
+            {% endif %}
+        </div>
+    </div>
+</body>
+</html>

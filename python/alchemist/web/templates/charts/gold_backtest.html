@@ -1,0 +1,581 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row mb-3">
+    <div class="col-12">
+        <h2><i class="bi bi-trophy"></i> 黄金策略回测</h2>
+        <p class="text-muted">择时增强型定投策略 — 多因子信号分析与战术动作可视化</p>
+    </div>
+</div>
+
+<!-- 控制面板 -->
+<div class="row mb-3">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <form id="backtest-form" class="row g-3 align-items-end">
+                    <div class="col-md-2">
+                        <label for="start-date" class="form-label">开始日期</label>
+                        <input type="date" id="start-date" class="form-control" value="2024-01-01">
+                    </div>
+                    <div class="col-md-2">
+                        <label for="end-date" class="form-label">结束日期</label>
+                        <input type="date" id="end-date" class="form-control">
+                    </div>
+                    <div class="col-md-5">
+                        <label class="form-label">叠加指标</label>
+                        <div class="d-flex flex-wrap gap-3">
+                            <div class="form-check">
+                                <input class="form-check-input indicator-check" type="checkbox" value="GDX" id="chk-gdx">
+                                <label class="form-check-label" for="chk-gdx">GDX <small class="text-muted">矿业</small></label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input indicator-check" type="checkbox" value="SPY" id="chk-spy">
+                                <label class="form-check-label" for="chk-spy">SPY <small class="text-muted">标普</small></label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input indicator-check" type="checkbox" value="UUP" id="chk-uup">
+                                <label class="form-check-label" for="chk-uup">UUP <small class="text-muted">美元</small></label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input indicator-check" type="checkbox" value="TIP" id="chk-tip">
+                                <label class="form-check-label" for="chk-tip">TIP <small class="text-muted">通胀</small></label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input indicator-check" type="checkbox" value="TLT" id="chk-tlt">
+                                <label class="form-check-label" for="chk-tlt">TLT <small class="text-muted">国债</small></label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input indicator-check" type="checkbox" value="VIXY" id="chk-vixy">
+                                <label class="form-check-label" for="chk-vixy">VIXY <small class="text-muted">波动</small></label>
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label">参数方案</label>
+                        <div class="btn-group w-100" role="group">
+                            <input type="radio" class="btn-check" name="param-mode" id="param-optimized" value="optimized" checked>
+                            <label class="btn btn-outline-success btn-sm" for="param-optimized">优化方案</label>
+                            <input type="radio" class="btn-check" name="param-mode" id="param-default" value="default">
+                            <label class="btn btn-outline-secondary btn-sm" for="param-default">默认方案</label>
+                        </div>
+                    </div>
+                    <div class="col-md-1">
+                        <button type="submit" class="btn btn-primary w-100" id="btn-query">
+                            <i class="bi bi-search"></i> 查询
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 信号统计卡片 -->
+<div class="row mb-3" id="stats-row" style="display: none;">
+    <div class="col-md-2">
+        <div class="card text-center border-success">
+            <div class="card-body py-2">
+                <div class="fs-4 fw-bold text-success" id="stat-boost">0</div>
+                <small class="text-muted">加量买入</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-2">
+        <div class="card text-center border-primary">
+            <div class="card-body py-2">
+                <div class="fs-4 fw-bold text-primary" id="stat-normal">0</div>
+                <small class="text-muted">正常买入</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-2">
+        <div class="card text-center border-secondary">
+            <div class="card-body py-2">
+                <div class="fs-4 fw-bold text-secondary" id="stat-reduce">0</div>
+                <small class="text-muted">减量买入</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-2">
+        <div class="card text-center border-warning">
+            <div class="card-body py-2">
+                <div class="fs-4 fw-bold text-warning" id="stat-skip">0</div>
+                <small class="text-muted">跳过买入</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-2">
+        <div class="card text-center border-danger">
+            <div class="card-body py-2">
+                <div class="fs-4 fw-bold text-danger" id="stat-sell">0</div>
+                <small class="text-muted">部分卖出</small>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-2">
+        <div class="card text-center border-info">
+            <div class="card-body py-2">
+                <div class="fs-4 fw-bold text-info" id="stat-total">0</div>
+                <small class="text-muted">总信号数</small>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 加载提示 -->
+<div class="row mb-3" id="loading-row" style="display: none;">
+    <div class="col-12 text-center py-5">
+        <div class="spinner-border text-primary" role="status"></div>
+        <p class="mt-2 text-muted">正在计算信号...</p>
+    </div>
+</div>
+
+<!-- 图表区域 -->
+<div id="charts-container" style="display: none;">
+    <!-- 价格走势 + 信号标记 -->
+    <div class="row mb-3">
+        <div class="col-12">
+            <div class="card">
+                <div class="card-header d-flex justify-content-between align-items-center flex-wrap gap-2">
+                    <h5 class="mb-0">GLD 价格走势 / 因子得分 / 交易信号</h5>
+                    <div class="d-flex gap-3 small flex-wrap align-items-center">
+                        <span><i class="bi bi-triangle-fill" style="color:#2e7d32;"></i> 加量买入</span>
+                        <span><i class="bi bi-triangle-fill" style="color:#1976d2;"></i> 正常买入</span>
+                        <span><i class="bi bi-triangle-fill" style="color:#9e9e9e;"></i> 减量买入</span>
+                        <span><i class="bi bi-caret-down-fill" style="color:#d32f2f;"></i> 卖出</span>
+                        <span class="ms-1 border-start ps-2 fw-semibold">得分:</span>
+                        <div class="form-check form-check-inline mb-0">
+                            <input class="form-check-input factor-toggle" type="checkbox" id="fac-composite" value="composite" checked>
+                            <label class="form-check-label" for="fac-composite" style="color:#e53935; font-weight:600;">综合</label>
+                        </div>
+                        <div class="form-check form-check-inline mb-0">
+                            <input class="form-check-input factor-toggle" type="checkbox" id="fac-tech" value="technical">
+                            <label class="form-check-label" for="fac-tech" style="color:#ff9800;">技术面</label>
+                        </div>
+                        <div class="form-check form-check-inline mb-0">
+                            <input class="form-check-input factor-toggle" type="checkbox" id="fac-cross" value="cross_market">
+                            <label class="form-check-label" for="fac-cross" style="color:#2196f3;">跨市场</label>
+                        </div>
+                        <div class="form-check form-check-inline mb-0">
+                            <input class="form-check-input factor-toggle" type="checkbox" id="fac-sent" value="sentiment">
+                            <label class="form-check-label" for="fac-sent" style="color:#9c27b0;">情绪</label>
+                        </div>
+                        <div class="form-check form-check-inline mb-0">
+                            <input class="form-check-input factor-toggle" type="checkbox" id="fac-macro" value="macro">
+                            <label class="form-check-label" for="fac-macro" style="color:#4caf50;">宏观</label>
+                        </div>
+                    </div>
+                </div>
+                <div class="card-body p-2">
+                    <div id="price-chart" style="height: 550px;"></div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 策略参数卡片 -->
+    <div class="row mb-3" id="params-row">
+        <div class="col-12">
+            <div class="card" id="params-card">
+                <div class="card-header d-flex justify-content-between align-items-center">
+                    <h5 class="mb-0"><i class="bi bi-sliders"></i> 当前策略参数</h5>
+                    <span id="params-badge"></span>
+                </div>
+                <div class="card-body">
+                    <div class="row">
+                        <!-- 因子权重 -->
+                        <div class="col-md-3">
+                            <h6 class="text-muted mb-2">因子权重</h6>
+                            <table class="table table-sm table-borderless mb-0">
+                                <tbody id="params-weights"></tbody>
+                            </table>
+                        </div>
+                        <!-- 战术阈值 -->
+                        <div class="col-md-4">
+                            <h6 class="text-muted mb-2">战术阈值</h6>
+                            <table class="table table-sm table-borderless mb-0">
+                                <tbody id="params-thresholds"></tbody>
+                            </table>
+                        </div>
+                        <!-- 仓位管理 -->
+                        <div class="col-md-5">
+                            <h6 class="text-muted mb-2">仓位管理</h6>
+                            <table class="table table-sm table-borderless mb-0">
+                                <tbody id="params-position"></tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// 缓存最近一次查询数据，用于因子切换时重绘
+let cachedData = null;
+
+// 设置默认结束日期为今天
+document.getElementById('end-date').value = new Date().toISOString().split('T')[0];
+
+// 表单提交
+document.getElementById('backtest-form').addEventListener('submit', function(e) {
+    e.preventDefault();
+    loadBacktest();
+});
+
+// 因子复选框切换 → 仅重绘价格图（不重新请求数据）
+document.querySelectorAll('.factor-toggle').forEach(chk => {
+    chk.addEventListener('change', function() {
+        if (cachedData) renderPriceChart(cachedData);
+    });
+});
+
+async function loadBacktest() {
+    const startDate = document.getElementById('start-date').value;
+    const endDate = document.getElementById('end-date').value;
+
+    if (!startDate || !endDate) {
+        alert('请选择日期区间');
+        return;
+    }
+
+    // 收集选中的指标
+    const checks = document.querySelectorAll('.indicator-check:checked');
+    const indicators = Array.from(checks).map(c => c.value).join(',');
+
+    // 参数方案
+    const paramMode = document.querySelector('input[name="param-mode"]:checked').value;
+    const useOptimized = paramMode === 'optimized';
+
+    // 显示加载
+    document.getElementById('loading-row').style.display = '';
+    document.getElementById('charts-container').style.display = 'none';
+    document.getElementById('stats-row').style.display = 'none';
+    document.getElementById('btn-query').disabled = true;
+
+    let url = `/api/gold-backtest/signals?start_date=${startDate}&end_date=${endDate}&use_optimized=${useOptimized}`;
+    if (indicators) url += `&indicators=${indicators}`;
+
+    try {
+        const resp = await fetch(url);
+        if (!resp.ok) {
+            const err = await resp.json();
+            alert(err.detail || '查询失败');
+            return;
+        }
+        const data = await resp.json();
+        renderAll(data);
+    } catch (error) {
+        console.error('查询失败:', error);
+        alert('查询失败: ' + error.message);
+    } finally {
+        document.getElementById('loading-row').style.display = 'none';
+        document.getElementById('btn-query').disabled = false;
+    }
+}
+
+function renderAll(data) {
+    cachedData = data;
+    document.getElementById('charts-container').style.display = '';
+    document.getElementById('stats-row').style.display = '';
+
+    updateStats(data.signals);
+    renderPriceChart(data);
+    renderParams(data.strategy_params);
+}
+
+// ==================== 统计卡片 ====================
+function updateStats(signals) {
+    const counts = { boost_buy: 0, normal_buy: 0, reduce_buy: 0, skip_buy: 0, partial_sell: 0 };
+    let totalSignals = 0;
+    signals.forEach(s => {
+        if (s.signal_type) totalSignals++;
+        if (s.tactical_action === 'boost_buy' && s.signal_type) counts.boost_buy++;
+        else if (s.tactical_action === 'normal_buy' && s.signal_type) counts.normal_buy++;
+        else if (s.tactical_action === 'reduce_buy' && s.signal_type) counts.reduce_buy++;
+        else if (s.tactical_action === 'skip_buy') counts.skip_buy++;
+        else if (s.tactical_action === 'partial_sell' && s.signal_type) counts.partial_sell++;
+    });
+    // Count skip_buy days (buy days where score was too low)
+    counts.skip_buy = signals.filter(s => s.tactical_action === 'skip_buy').length;
+
+    document.getElementById('stat-boost').textContent = counts.boost_buy;
+    document.getElementById('stat-normal').textContent = counts.normal_buy;
+    document.getElementById('stat-reduce').textContent = counts.reduce_buy;
+    document.getElementById('stat-skip').textContent = counts.skip_buy;
+    document.getElementById('stat-sell').textContent = counts.partial_sell;
+    document.getElementById('stat-total').textContent = totalSignals;
+}
+
+// ==================== 策略参数卡片 ====================
+function renderParams(params) {
+    if (!params) return;
+
+    const buyDayNames = {0: '周一', 1: '周二', 2: '周三', 3: '周四', 4: '周五'};
+
+    // 来源标识
+    const badge = document.getElementById('params-badge');
+    if (params.source === 'optimized') {
+        badge.innerHTML = `<span class="badge bg-success"><i class="bi bi-check-circle"></i> 优化方案</span>` +
+            (params.source_file ? ` <small class="text-muted ms-1">${params.source_file}</small>` : '');
+    } else {
+        badge.innerHTML = `<span class="badge bg-secondary">默认方案</span>`;
+    }
+
+    // 因子权重
+    const w = params.weights;
+    document.getElementById('params-weights').innerHTML =
+        paramRow('技术面', pct(w.technical), '#ff9800') +
+        paramRow('跨市场', pct(w.cross_market), '#2196f3') +
+        paramRow('情绪', pct(w.sentiment), '#9c27b0') +
+        paramRow('宏观', pct(w.macro), '#4caf50');
+
+    // 战术阈值
+    const t = params.thresholds;
+    document.getElementById('params-thresholds').innerHTML =
+        paramRow('加量买入 >', fmt(t.boost_buy), '#2e7d32') +
+        paramRow('正常买入 >', fmt(t.normal_buy), '#1976d2') +
+        paramRow('减量买入 >', fmt(t.reduce_buy), '#9e9e9e') +
+        paramRow('跳过 >', fmt(t.skip_buy), '#ff9800') +
+        paramRow('卖出 <', fmt(t.partial_sell), '#d32f2f');
+
+    // 仓位管理
+    const p = params.position;
+    let posHtml =
+        paramRow('买入日', buyDayNames[p.buy_day] || `day${p.buy_day}`, '#333') +
+        paramRow('加量倍率', fmt(p.boost_multiplier) + 'x', '#2e7d32') +
+        paramRow('减量倍率', fmt(p.reduce_multiplier) + 'x', '#9e9e9e') +
+        paramRow('卖出比例', pct(p.sell_fraction), '#d32f2f');
+    if (p.force_sell_interval_days) {
+        posHtml +=
+            paramRow('强制卖出间隔', p.force_sell_interval_days + '天', '#795548') +
+            paramRow('强制卖出比例', pct(p.force_sell_fraction), '#795548') +
+            paramRow('强制卖出利润阈值', pct(p.force_sell_profit_thresh), '#795548');
+    }
+    document.getElementById('params-position').innerHTML = posHtml;
+}
+
+function paramRow(label, value, color) {
+    return `<tr>
+        <td class="py-0 pe-2" style="white-space:nowrap;"><small class="text-muted">${label}</small></td>
+        <td class="py-0 fw-semibold" style="color:${color};">${value}</td>
+    </tr>`;
+}
+
+function pct(v) { return (v * 100).toFixed(1) + '%'; }
+function fmt(v) { return v != null ? v.toFixed(4) : '-'; }
+
+// ==================== 价格图 + 因子拆解 + 信号标记 ====================
+function renderPriceChart(data) {
+    const dates = data.gold_prices.map(p => p.date);
+    const closes = data.gold_prices.map(p => p.close);
+    const signalDates = data.signals.map(s => s.date);
+
+    // 从实际返回的权重构建因子标签
+    const fw = data.factor_weights;
+
+    const traces = [];
+
+    // GLD 价格线（左 y 轴）
+    traces.push({
+        x: dates,
+        y: closes,
+        type: 'scatter',
+        mode: 'lines',
+        name: 'GLD',
+        line: { color: '#ffc107', width: 2.5 },
+        yaxis: 'y',
+    });
+
+    // 因子拆解折线（右 y 轴 y2，固定 [-1, 1]）
+    // 读取哪些因子被勾选
+    const enabledFactors = new Set(
+        Array.from(document.querySelectorAll('.factor-toggle:checked')).map(c => c.value)
+    );
+
+    const factorConfig = [
+        { key: 'technical',    name: `技术面 (${pct(fw.technical)})`, color: '#ff9800' },
+        { key: 'cross_market', name: `跨市场 (${pct(fw.cross_market)})`, color: '#2196f3' },
+        { key: 'sentiment',    name: `情绪 (${pct(fw.sentiment)})`,   color: '#9c27b0' },
+        { key: 'macro',        name: `宏观 (${pct(fw.macro)})`,   color: '#4caf50' },
+    ];
+
+    // 是否需要右侧得分 y 轴
+    let hasScoreAxis = false;
+
+    // 综合得分柱状图（可切换）
+    if (enabledFactors.has('composite')) {
+        hasScoreAxis = true;
+        const scores = data.signals.map(s => s.composite_score);
+        const barColors = scores.map(s => s >= 0 ? 'rgba(76,175,80,0.35)' : 'rgba(244,67,54,0.35)');
+        traces.push({
+            x: signalDates,
+            y: scores,
+            type: 'bar',
+            name: '综合得分',
+            marker: { color: barColors },
+            yaxis: 'y2',
+            hovertemplate: '综合得分<br>%{x}<br>得分: %{y:.3f}<extra></extra>',
+        });
+    }
+
+    // 各因子拆解折线（可切换）
+    factorConfig.forEach(f => {
+        if (!enabledFactors.has(f.key)) return;
+        hasScoreAxis = true;
+        traces.push({
+            x: signalDates,
+            y: data.signals.map(s => s.factor_scores[f.key]),
+            type: 'scatter',
+            mode: 'lines',
+            name: f.name,
+            line: { color: f.color, width: 1.2 },
+            yaxis: 'y2',
+            opacity: 0.8,
+            hovertemplate: `${f.name}<br>%{x}<br>得分: %{y:.3f}<extra></extra>`,
+        });
+    });
+
+    // 信号标记 — 分类（在价格 y 轴上标记）
+    const signalGroups = {
+        boost_buy:    { dates: [], prices: [], scores: [], color: '#2e7d32', symbol: 'triangle-up', size: 14, name: '加量买入' },
+        normal_buy:   { dates: [], prices: [], scores: [], color: '#1976d2', symbol: 'triangle-up', size: 11, name: '正常买入' },
+        reduce_buy:   { dates: [], prices: [], scores: [], color: '#9e9e9e', symbol: 'triangle-up', size: 8,  name: '减量买入' },
+        partial_sell:  { dates: [], prices: [], scores: [], color: '#d32f2f', symbol: 'triangle-down', size: 14, name: '卖出' },
+    };
+
+    const priceMap = {};
+    data.gold_prices.forEach(p => { priceMap[p.date] = p.close; });
+
+    data.signals.forEach(s => {
+        if (!s.signal_type) return;
+        const group = signalGroups[s.tactical_action];
+        if (!group) return;
+        const price = priceMap[s.date];
+        if (price === undefined) return;
+        group.dates.push(s.date);
+        group.prices.push(price);
+        group.scores.push(s.composite_score);
+    });
+
+    Object.entries(signalGroups).forEach(([action, g]) => {
+        if (g.dates.length === 0) return;
+        traces.push({
+            x: g.dates,
+            y: g.prices,
+            type: 'scatter',
+            mode: 'markers',
+            name: g.name,
+            marker: {
+                color: g.color,
+                symbol: g.symbol,
+                size: g.size,
+                line: { color: '#fff', width: 1 },
+            },
+            text: g.dates.map((d, i) => `${d}<br>价格: ${g.prices[i].toFixed(2)}<br>得分: ${g.scores[i].toFixed(3)}<br>动作: ${g.name}`),
+            hoverinfo: 'text',
+            yaxis: 'y',
+        });
+    });
+
+    // 叠加跨市场指标（归一化到 100，放在第三个 y 轴 y3）
+    const indicatorColors = {
+        GDX: '#e91e63', SPY: '#00bcd4', UUP: '#ff5722',
+        TIP: '#8bc34a', TLT: '#673ab7', VIXY: '#795548',
+    };
+
+    let hasIndicator = false;
+    Object.entries(data.indicator_series).forEach(([symbol, series]) => {
+        if (series.length === 0) return;
+        hasIndicator = true;
+        const basePrice = series[0].close;
+        traces.push({
+            x: series.map(d => d.date),
+            y: series.map(d => (d.close / basePrice) * 100),
+            type: 'scatter',
+            mode: 'lines',
+            name: symbol,
+            line: { color: indicatorColors[symbol] || '#607d8b', width: 1.5, dash: 'dot' },
+            yaxis: 'y3',
+            opacity: 0.6,
+        });
+    });
+
+    // 综合得分阈值线（使用实际策略阈值）
+    const shapes = [];
+    const annotations = [];
+    if (enabledFactors.has('composite') && data.strategy_params) {
+        const t = data.strategy_params.thresholds;
+        const thresholds = [
+            { y: t.boost_buy,    label: `加量 ${fmt(t.boost_buy)}`,    color: '#2e7d32' },
+            { y: t.normal_buy,   label: `正常 ${fmt(t.normal_buy)}`,   color: '#1976d2' },
+            { y: t.skip_buy,     label: `跳过 ${fmt(t.skip_buy)}`,     color: '#ff9800' },
+            { y: t.partial_sell, label: `卖出 ${fmt(t.partial_sell)}`,  color: '#d32f2f' },
+        ];
+        thresholds.forEach(t => {
+            shapes.push({
+                type: 'line', xref: 'paper', x0: 0, x1: 1,
+                yref: 'y2', y0: t.y, y1: t.y,
+                line: { color: t.color, width: 1, dash: 'dash' },
+            });
+            annotations.push({
+                xref: 'paper', x: 1.01, yref: 'y2', y: t.y,
+                text: t.label, showarrow: false,
+                font: { size: 9, color: t.color },
+                xanchor: 'left',
+            });
+        });
+    }
+
+    const layout = {
+        xaxis: { title: '', type: 'date', rangeslider: { visible: false } },
+        yaxis: {
+            title: 'GLD 价格 ($)',
+            side: 'left',
+        },
+        margin: { t: 10, b: 30, l: 60, r: hasScoreAxis ? 70 : 20 },
+        legend: { orientation: 'h', y: -0.08, font: { size: 11 } },
+        hovermode: 'closest',
+        shapes: shapes,
+        annotations: annotations,
+        bargap: 0.05,
+    };
+
+    if (hasScoreAxis) {
+        layout.yaxis2 = {
+            title: '得分',
+            side: 'right',
+            range: [-1.1, 1.1],
+            overlaying: 'y',
+            showgrid: false,
+            zeroline: true,
+            zerolinecolor: '#bdbdbd',
+            zerolinewidth: 1,
+            tickvals: [-1, -0.5, 0, 0.5, 1],
+        };
+    }
+
+    if (hasIndicator) {
+        // 第三个 y 轴在最右侧（偏移）
+        layout.yaxis3 = {
+            title: '指标 (归一化)',
+            side: 'right',
+            overlaying: 'y',
+            showgrid: false,
+            anchor: 'free',
+            position: 1,
+        };
+        layout.margin.r = 100;
+    }
+
+    Plotly.newPlot('price-chart', traces, layout, { responsive: true });
+}
+
+
+</script>
+{% endblock %}

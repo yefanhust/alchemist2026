@@ -36,3 +36,13 @@ async def comparison_chart(request: Request):
         "charts/comparison.html",
         {"request": request, "title": "多资产对比"}
     )
+
+
+@router.get("/chart/gold-backtest", response_class=HTMLResponse)
+async def gold_backtest_chart(request: Request):
+    """黄金策略回测页面"""
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        "charts/gold_backtest.html",
+        {"request": request, "title": "黄金策略回测"}
+    )
