@@ -129,7 +129,8 @@ logs/*.log
 !data/cache/.gitkeep
 !data/output/.gitkeep
 
-# Secrets
+# Secrets and sensitive config
 .env
+config/config.yaml
 *.pem
 *.key

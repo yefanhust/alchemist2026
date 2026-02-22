@@ -1,0 +1,66 @@
+# 金融交易系统配置模板
+# 使用方法: 复制此文件为 config.yaml 并填入真实值
+# cp config/default.yaml.example config/config.yaml
+
+# Alpha Vantage API 配置
+alphavantage:
+  # 从 https://www.alphavantage.co/support/#api-key 获取 API Key
+  api_key: "your_api_key_here"
+  # API plan 类型: free / premium
+  #   free    -> calls_per_minute: 5, calls_per_day: 500
+  #   premium -> calls_per_minute: 75, calls_per_day: unlimited
+  plan: "free"
+  calls_per_minute: 5
+  calls_per_day: 500
+
+# 数据库配置
+database:
+  # SQLite（默认）
+  url: "sqlite:///./data/cache/market_data.db"
+  # PostgreSQL（可选，用于生产环境）
+  # url: "postgresql://user:password@localhost:5432/quant_db"
+  pool_size: 5
+  echo: false
+
+# Redis 配置（可选，用于高性能缓存）
+redis:
+  url: "redis://localhost:6379/0"
+
+# GPU 配置
+gpu:
+  enabled: true
+  device_ids: [0, 1]        # 使用的 GPU 设备
+  memory_fraction: 0.8      # GPU 内存分配比例
+
+# 日志配置
+logging:
+  level: "INFO"
+  file: "./logs/quant_system.log"
+  rotation: "10 MB"
+  retention: "1 week"
+
+# 券商配置
+broker:
+  commission_rate: 0.001    # 0.1%
+  min_commission: 1.0       # 最低 $1
+  slippage_rate: 0.0005     # 0.05%
+  short_selling_enabled: false
+
+# 模拟交易配置
+initial_capital: 100000.0
+
+# 调试模式
+debug: false
+testing: false
+
+# Web 服务配置
+web:
+  host: "0.0.0.0"
+  port: 8443
+  debug: false
+  ssl:
+    enabled: true
+    keyfile: "/workspace/python/alchemist/web/ssl/key.pem"
+    certfile: "/workspace/python/alchemist/web/ssl/cert.pem"
+  # 域名配置
+  domain: "your-domain.example.com"
