@@ -313,7 +313,10 @@ class AlphaVantageProvider(DataProvider):
         if self.cache:
             cached_data = await self.cache.get(cache_key)
             if cached_data is not None:
-                logger.debug(f"从缓存获取 {symbol} 数据")
+                logger.info(f"从缓存获取 {symbol} 数据 ({len(cached_data)} 条)")
+                # 确保 market_data 表也有数据（供 Web 仪表盘查询）
+                if hasattr(self.cache, "save_market_data"):
+                    await self.cache.save_market_data(symbol, interval.value, cached_data)
                 return cached_data
 
         # 从 API 获取数据
@@ -351,6 +354,9 @@ class AlphaVantageProvider(DataProvider):
         # 保存到缓存
         if self.cache and not market_data.is_empty:
             await self.cache.set(cache_key, market_data)
+            # 同步写入 market_data 表，供 Web 仪表盘直接查询
+            if hasattr(self.cache, "save_market_data"):
+                await self.cache.save_market_data(symbol, interval.value, market_data)
 
         return market_data
 
@@ -474,6 +480,162 @@ class AlphaVantageProvider(DataProvider):
             "change": float(global_quote.get("09. change", 0)),
             "change_percent": global_quote.get("10. change percent", "0%").replace("%", ""),
         }
+
+    async def get_forex_daily(
+        self,
+        from_symbol: str,
+        to_symbol: str,
+        start_date: datetime,
+        end_date: Optional[datetime] = None,
+    ) -> MarketData:
+        """
+        获取外汇日线数据
+
+        Args:
+            from_symbol: 基础货币（如 EUR）
+            to_symbol: 报价货币（如 USD）
+            start_date: 开始日期
+            end_date: 结束日期
+
+        Returns:
+            MarketData 对象（volume 为 0）
+        """
+        pair = f"{from_symbol.upper()}/{to_symbol.upper()}"
+        end_date = end_date or datetime.now()
+
+        # 尝试缓存
+        cache_key = self._generate_cache_key(
+            f"FX_{from_symbol}_{to_symbol}", start_date, end_date, DataInterval.DAILY
+        )
+        if self.cache:
+            cached = await self.cache.get(cache_key)
+            if cached is not None:
+                logger.info(f"从缓存获取 {pair} 外汇数据 ({len(cached)} 条)")
+                return cached
+
+        logger.info(f"从 Alpha Vantage 获取 {pair} 外汇数据")
+        params = {
+            "function": "FX_DAILY",
+            "from_symbol": from_symbol.upper(),
+            "to_symbol": to_symbol.upper(),
+            "outputsize": "full",
+        }
+        data = await self._make_request(params)
+
+        # FX_DAILY 返回 "Time Series FX (Daily)" 键，复用解析逻辑
+        market_data = self._parse_response(pair, data, DataInterval.DAILY)
+        market_data = market_data.slice(start_date, end_date)
+
+        if self.cache and not market_data.is_empty:
+            await self.cache.set(cache_key, market_data)
+
+        return market_data
+
+    async def get_economic_indicator(
+        self,
+        function: str,
+        start_date: datetime,
+        end_date: Optional[datetime] = None,
+        interval: str = "daily",
+        maturity: Optional[str] = None,
+    ) -> MarketData:
+        """
+        获取经济指标数据（TREASURY_YIELD、CPI、INFLATION 等）
+
+        Alpha Vantage 经济指标返回格式：
+        {"name": "...", "interval": "...", "data": [{"date": "2024-01-02", "value": "4.25"}, ...]}
+
+        将 value 填入 OHLCV 的 close 字段。
+
+        Args:
+            function: API 函数名（如 TREASURY_YIELD）
+            start_date: 开始日期
+            end_date: 结束日期
+            interval: 数据间隔（daily / weekly / monthly）
+            maturity: 到期期限（仅 TREASURY_YIELD 使用，如 10year）
+
+        Returns:
+            MarketData 对象
+        """
+        end_date = end_date or datetime.now()
+        symbol = f"{function}:{maturity}" if maturity else function
+
+        cache_key = self._generate_cache_key(symbol, start_date, end_date, DataInterval.DAILY)
+        if self.cache:
+            cached = await self.cache.get(cache_key)
+            if cached is not None:
+                logger.info(f"从缓存获取 {symbol} 经济指标 ({len(cached)} 条)")
+                return cached
+
+        logger.info(f"从 Alpha Vantage 获取 {symbol} 经济指标")
+        params = {"function": function, "interval": interval}
+        if maturity:
+            params["maturity"] = maturity
+
+        data = await self._make_request(params)
+
+        # 解析经济指标格式
+        ohlcv_list = []
+        for entry in data.get("data", []):
+            try:
+                date_str = entry.get("date", "")
+                value_str = entry.get("value", "")
+                if value_str == "." or not value_str:
+                    continue
+                value = float(value_str)
+                timestamp = datetime.strptime(date_str, "%Y-%m-%d")
+                ohlcv_list.append(OHLCV(
+                    timestamp=timestamp,
+                    open=value,
+                    high=value,
+                    low=value,
+                    close=value,
+                    volume=0,
+                    adjusted_close=value,
+                ))
+            except (ValueError, KeyError) as e:
+                logger.warning(f"解析经济指标数据点失败: {entry}, {e}")
+                continue
+
+        ohlcv_list.sort(key=lambda x: x.timestamp)
+        market_data = MarketData(
+            symbol=symbol,
+            data=ohlcv_list,
+            metadata={"source": "alphavantage", "type": "economic_indicator"},
+        )
+        market_data = market_data.slice(start_date, end_date)
+
+        if self.cache and not market_data.is_empty:
+            await self.cache.set(cache_key, market_data)
+
+        return market_data
+
+    async def get_treasury_yield(
+        self,
+        start_date: datetime,
+        end_date: Optional[datetime] = None,
+        maturity: str = "10year",
+        interval: str = "daily",
+    ) -> MarketData:
+        """
+        获取美国国债收益率数据
+
+        Args:
+            start_date: 开始日期
+            end_date: 结束日期
+            maturity: 到期期限（3month, 2year, 5year, 7year, 10year, 30year）
+            interval: 数据间隔（daily, weekly, monthly）
+
+        Returns:
+            MarketData 对象（close 字段为收益率百分比值，如 4.25 表示 4.25%）
+        """
+        return await self.get_economic_indicator(
+            function="TREASURY_YIELD",
+            start_date=start_date,
+            end_date=end_date,
+            interval=interval,
+            maturity=maturity,
+        )
 
     async def search_symbols(self, keywords: str) -> List[Dict[str, Any]]:
         """

@@ -35,18 +35,22 @@ class SQLiteCache(CacheBackend):
     
     def __init__(
         self,
-        db_path: str = "./data/cache/market_data.db",
+        db_path: Optional[str] = None,
         default_ttl: Optional[timedelta] = None,
     ):
         """
         初始化 SQLite 缓存
-        
+
         Args:
-            db_path: 数据库文件路径
+            db_path: 数据库文件路径（默认使用项目根目录下 data/cache/market_data.db）
             default_ttl: 默认过期时间
         """
         super().__init__(default_ttl)
-        
+
+        if db_path is None:
+            from utils.config import get_data_cache_path
+            db_path = get_data_cache_path()
+
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         
@@ -92,9 +96,42 @@ class SQLiteCache(CacheBackend):
                     )
                 """)
                 
+                # 创建股票信息表（存储 Sector/Industry 等元数据）
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS stock_info (
+                        symbol TEXT PRIMARY KEY,
+                        name TEXT,
+                        exchange TEXT,
+                        asset_type TEXT,
+                        sector TEXT,
+                        industry TEXT,
+                        country TEXT,
+                        currency TEXT,
+                        description TEXT,
+                        market_cap REAL,
+                        pe_ratio REAL,
+                        dividend_yield REAL,
+                        eps REAL,
+                        beta REAL,
+                        high_52week REAL,
+                        low_52week REAL,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+
                 # 创建索引
                 await db.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_market_data_symbol_interval 
+                    CREATE INDEX IF NOT EXISTS idx_stock_info_sector
+                    ON stock_info(sector)
+                """)
+
+                await db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_stock_info_industry
+                    ON stock_info(industry)
+                """)
+
+                await db.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_market_data_symbol_interval
                     ON market_data(symbol, interval)
                 """)
                 
@@ -274,12 +311,33 @@ class SQLiteCache(CacheBackend):
             )
             expired_entries = (await cursor.fetchone())[0]
             
-            # 市场数据条目数
+            # 市场数据条目数（market_data 表行数 + cache_entries 中的 market_data 条目）
             cursor = await db.execute("SELECT COUNT(*) FROM market_data")
-            market_data_entries = (await cursor.fetchone())[0]
+            market_data_rows = (await cursor.fetchone())[0]
+
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM cache_entries WHERE data_type = 'market_data'"
+            )
+            market_data_cache = (await cursor.fetchone())[0]
+            market_data_entries = market_data_rows + market_data_cache
             
-            # 市场数据覆盖的股票数
-            cursor = await db.execute("SELECT COUNT(DISTINCT symbol) FROM market_data")
+            # 市场数据覆盖的股票数（合并 market_data 表和 cache_entries 中的 symbol）
+            cursor = await db.execute("""
+                SELECT COUNT(*) FROM (
+                    SELECT DISTINCT symbol FROM market_data
+                    UNION
+                    SELECT DISTINCT
+                        CASE
+                            WHEN INSTR(key, ':') > 0
+                            THEN SUBSTR(key,
+                                INSTR(key, ':') + 1,
+                                INSTR(SUBSTR(key, INSTR(key, ':') + 1), ':') - 1
+                            )
+                        END AS symbol
+                    FROM cache_entries
+                    WHERE data_type = 'market_data'
+                )
+            """)
             unique_symbols = (await cursor.fetchone())[0]
             
             # 数据库文件大小
@@ -421,6 +479,236 @@ class SQLiteCache(CacheBackend):
             logger.error(f"获取市场数据失败: {symbol}, {e}")
             return None
     
+    # ========== 股票信息方法 ==========
+
+    async def save_stock_info(
+        self,
+        symbol: str,
+        info: Dict[str, Any],
+    ) -> bool:
+        """
+        保存股票信息到专用表
+
+        Args:
+            symbol: 股票代码
+            info: 股票信息字典，包含 sector, industry 等字段
+
+        Returns:
+            是否保存成功
+        """
+        await self._ensure_initialized()
+
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    """
+                    INSERT OR REPLACE INTO stock_info
+                    (symbol, name, exchange, asset_type, sector, industry,
+                     country, currency, description, market_cap, pe_ratio,
+                     dividend_yield, eps, beta, high_52week, low_52week, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        symbol.upper(),
+                        info.get("name"),
+                        info.get("exchange"),
+                        info.get("asset_type"),
+                        info.get("sector"),
+                        info.get("industry"),
+                        info.get("country"),
+                        info.get("currency"),
+                        info.get("description"),
+                        info.get("market_cap"),
+                        info.get("pe_ratio"),
+                        info.get("dividend_yield"),
+                        info.get("eps"),
+                        info.get("beta"),
+                        info.get("high_52week"),
+                        info.get("low_52week"),
+                        datetime.now().isoformat(),
+                    )
+                )
+                await db.commit()
+            return True
+
+        except Exception as e:
+            logger.error(f"保存股票信息失败: {symbol}, {e}")
+            return False
+
+    async def get_stock_info(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        获取股票信息
+
+        Args:
+            symbol: 股票代码
+
+        Returns:
+            股票信息字典，包含 sector, industry 等字段
+        """
+        await self._ensure_initialized()
+
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT * FROM stock_info WHERE symbol = ?",
+                    (symbol.upper(),)
+                )
+                row = await cursor.fetchone()
+
+                if row is None:
+                    return None
+
+                return dict(row)
+
+        except Exception as e:
+            logger.error(f"获取股票信息失败: {symbol}, {e}")
+            return None
+
+    async def get_stock_info_batch(
+        self,
+        symbols: List[str],
+    ) -> Dict[str, Dict[str, Any]]:
+        """
+        批量获取股票信息
+
+        Args:
+            symbols: 股票代码列表
+
+        Returns:
+            {symbol: info_dict} 映射
+        """
+        await self._ensure_initialized()
+
+        if not symbols:
+            return {}
+
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                placeholders = ",".join("?" * len(symbols))
+                cursor = await db.execute(
+                    f"SELECT * FROM stock_info WHERE symbol IN ({placeholders})",
+                    [s.upper() for s in symbols]
+                )
+                rows = await cursor.fetchall()
+
+                return {row["symbol"]: dict(row) for row in rows}
+
+        except Exception as e:
+            logger.error(f"批量获取股票信息失败: {e}")
+            return {}
+
+    async def search_stocks_by_sector(
+        self,
+        sector: Optional[str] = None,
+        industry: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        按行业搜索股票
+
+        Args:
+            sector: 行业大类（如 Technology, Healthcare）
+            industry: 细分行业（如 Software, Biotechnology）
+
+        Returns:
+            匹配的股票信息列表
+        """
+        await self._ensure_initialized()
+
+        query = "SELECT * FROM stock_info WHERE 1=1"
+        params = []
+
+        if sector:
+            query += " AND LOWER(sector) LIKE ?"
+            params.append(f"%{sector.lower()}%")
+
+        if industry:
+            query += " AND LOWER(industry) LIKE ?"
+            params.append(f"%{industry.lower()}%")
+
+        query += " ORDER BY symbol"
+
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(query, params)
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
+
+        except Exception as e:
+            logger.error(f"搜索股票失败: {e}")
+            return []
+
+    async def get_all_sectors(self) -> List[str]:
+        """
+        获取所有已缓存的行业大类
+
+        Returns:
+            行业大类列表
+        """
+        await self._ensure_initialized()
+
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    """
+                    SELECT DISTINCT sector FROM stock_info
+                    WHERE sector IS NOT NULL AND sector != ''
+                    ORDER BY sector
+                    """
+                )
+                rows = await cursor.fetchall()
+                return [row[0] for row in rows]
+
+        except Exception as e:
+            logger.error(f"获取行业列表失败: {e}")
+            return []
+
+    async def get_stock_info_stats(self) -> Dict[str, Any]:
+        """
+        获取股票信息缓存统计
+
+        Returns:
+            统计信息
+        """
+        await self._ensure_initialized()
+
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                # 总条目数
+                cursor = await db.execute("SELECT COUNT(*) FROM stock_info")
+                total = (await cursor.fetchone())[0]
+
+                # 有 sector 信息的条目数
+                cursor = await db.execute(
+                    "SELECT COUNT(*) FROM stock_info WHERE sector IS NOT NULL AND sector != ''"
+                )
+                with_sector = (await cursor.fetchone())[0]
+
+                # 不同 sector 数量
+                cursor = await db.execute(
+                    "SELECT COUNT(DISTINCT sector) FROM stock_info WHERE sector IS NOT NULL AND sector != ''"
+                )
+                sector_count = (await cursor.fetchone())[0]
+
+                # 不同 industry 数量
+                cursor = await db.execute(
+                    "SELECT COUNT(DISTINCT industry) FROM stock_info WHERE industry IS NOT NULL AND industry != ''"
+                )
+                industry_count = (await cursor.fetchone())[0]
+
+                return {
+                    "total_stocks": total,
+                    "with_sector_info": with_sector,
+                    "unique_sectors": sector_count,
+                    "unique_industries": industry_count,
+                }
+
+        except Exception as e:
+            logger.error(f"获取统计信息失败: {e}")
+            return {}
+
     # ========== 序列化/反序列化 ==========
     
     def _serialize(self, value: Any) -> tuple:

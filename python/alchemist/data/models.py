@@ -212,23 +212,100 @@ class MarketData:
         filtered = [d for d in self.data if start <= d.timestamp <= end]
         return MarketData(symbol=self.symbol, data=filtered, metadata=self.metadata)
     
+    def _invalidate_cache(self) -> None:
+        """清除增量 numpy 缓存"""
+        self._cached_close: Optional[np.ndarray] = None
+        self._cached_volume: Optional[np.ndarray] = None
+        self._cached_len: int = 0
+
+    @property
+    def close_array(self) -> np.ndarray:
+        """
+        增量缓存的收盘价数组。
+
+        首次调用时从 self.data 构建，之后每次 append 只追加新元素，
+        避免 O(N) 的完整重建。
+        """
+        n = len(self.data)
+        cached_len = getattr(self, "_cached_len", 0)
+        cached = getattr(self, "_cached_close", None)
+
+        if cached is not None and cached_len == n:
+            return cached
+
+        if cached is not None and cached_len < n and cached_len > 0:
+            # 增量追加
+            new_vals = np.array(
+                [d.close for d in self.data[cached_len:]],
+                dtype=np.float64,
+            )
+            self._cached_close = np.concatenate([cached, new_vals])
+        else:
+            # 全量构建
+            self._cached_close = np.array(
+                [d.close for d in self.data], dtype=np.float64,
+            ) if n > 0 else np.array([], dtype=np.float64)
+
+        self._cached_len = n
+        # volume 同步失效，下次访问时重建
+        self._cached_volume = None
+        return self._cached_close
+
+    @property
+    def volume_array(self) -> np.ndarray:
+        """增量缓存的成交量数组"""
+        n = len(self.data)
+        cached_vol = getattr(self, "_cached_volume", None)
+        cached_vol_len = getattr(self, "_cached_vol_len", 0)
+
+        if cached_vol is not None and cached_vol_len == n:
+            return cached_vol
+
+        if cached_vol is not None and cached_vol_len < n and cached_vol_len > 0:
+            new_vals = np.array(
+                [d.volume for d in self.data[cached_vol_len:]],
+                dtype=np.float64,
+            )
+            self._cached_volume = np.concatenate([cached_vol, new_vals])
+        else:
+            self._cached_volume = np.array(
+                [d.volume for d in self.data], dtype=np.float64,
+            ) if n > 0 else np.array([], dtype=np.float64)
+
+        self._cached_vol_len = n
+        return self._cached_volume
+
     def append(self, ohlcv: OHLCV) -> None:
-        """添加数据点"""
+        """添加数据点（增量更新缓存）"""
         self.data.append(ohlcv)
+
+        # 增量追加到缓存数组（避免全量重建）
+        cached = getattr(self, "_cached_close", None)
+        cached_len = getattr(self, "_cached_len", 0)
+        if cached is not None and cached_len == len(self.data) - 1:
+            self._cached_close = np.append(cached, ohlcv.close)
+            self._cached_len = len(self.data)
+
+        cached_vol = getattr(self, "_cached_volume", None)
+        cached_vol_len = getattr(self, "_cached_vol_len", 0)
+        if cached_vol is not None and cached_vol_len == len(self.data) - 1:
+            self._cached_volume = np.append(cached_vol, ohlcv.volume)
+            self._cached_vol_len = len(self.data)
     
     def extend(self, other: "MarketData") -> None:
         """合并数据"""
         if other.symbol != self.symbol:
             raise ValueError("资产代码不匹配")
-        
+
         # 去重合并
         existing_timestamps = {d.timestamp for d in self.data}
         for ohlcv in other.data:
             if ohlcv.timestamp not in existing_timestamps:
                 self.data.append(ohlcv)
-        
+
         # 排序
         self.data.sort(key=lambda x: x.timestamp)
+        self._invalidate_cache()
     
     def resample(self, freq: str = "D") -> "MarketData":
         """
