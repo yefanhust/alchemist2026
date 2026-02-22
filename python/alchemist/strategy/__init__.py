@@ -5,10 +5,12 @@
 
 from strategy.base import Strategy, Signal, SignalType
 from strategy.indicators.base import Indicator
+from strategy.gold import GoldTradingStrategy
 
 __all__ = [
     "Strategy",
     "Signal",
     "SignalType",
     "Indicator",
+    "GoldTradingStrategy",
 ]
