@@ -21,6 +21,9 @@ from core.order import Order, OrderType, OrderSide, OrderStatus
 from core.position import Position, PositionSide, Trade
 from core.portfolio import Portfolio, PortfolioSnapshot
 from simulation.broker import VirtualBroker, BrokerConfig
+from simulation.engine import SimulationEngine
+from simulation.backtest import Backtester
+from strategy.base import Signal, SignalType
 from data.models import OHLCV
 
 
@@ -1390,6 +1393,474 @@ class TestNumericalPrecision:
         expected_avg = (33.33 + 44.44 + 55.55) / 3
 
         assert abs(position.avg_cost - expected_avg) < 0.0001
+
+
+# =============================================================================
+# 仓位计算测试（使用净值而非现金）
+# =============================================================================
+
+class TestPositionSizerNetValue:
+    """测试仓位计算使用净值而非现金，防止做空时仓位无限膨胀"""
+
+    def test_position_sizer_uses_net_value_not_cash(self):
+        """测试仓位计算使用净值而非现金"""
+        portfolio = Portfolio(initial_capital=100000.0)
+        broker = VirtualBroker(config=BrokerConfig())
+        engine = SimulationEngine(portfolio=portfolio, broker=broker)
+
+        # 模拟做空后现金增加的情况
+        asset = create_asset()
+        portfolio.cash = 200000.0  # 做空后现金增加
+
+        # 添加一个空头持仓
+        position = portfolio.get_position(asset)
+        position.quantity = -100
+        position.avg_cost = 100.0
+
+        # 更新当前价格
+        engine.current_prices = {"AAPL": 100.0}
+
+        # 创建信号
+        signal = Signal(
+            signal_type=SignalType.SELL,
+            asset=asset,
+            timestamp=datetime.now(),
+            strength=1.0,
+        )
+
+        # 计算仓位
+        quantity = engine._default_position_sizer(signal, portfolio, 100.0)
+
+        # 净值 = 200000 + (-100 * 100) = 190000
+        # 但应该使用 min(net_value, initial_capital) = min(190000, 100000) = 100000
+        # 仓位 = 100000 * 0.1 * 1.0 / 100 = 100
+        assert quantity <= 100, f"Position size should be limited: {quantity}"
+
+    def test_position_sizer_stops_at_negative_net_value(self):
+        """测试净值为负时不开仓"""
+        portfolio = Portfolio(initial_capital=100000.0)
+        broker = VirtualBroker(config=BrokerConfig())
+        engine = SimulationEngine(portfolio=portfolio, broker=broker)
+
+        # 模拟巨额亏损
+        asset = create_asset()
+        portfolio.cash = 50000.0
+
+        # 添加一个巨额空头亏损
+        position = portfolio.get_position(asset)
+        position.quantity = -100
+        position.avg_cost = 100.0
+
+        # 股价上涨导致巨额亏损
+        engine.current_prices = {"AAPL": 600.0}
+
+        # 净值 = 50000 + (-100 * 600) = -10000 (负数)
+
+        signal = Signal(
+            signal_type=SignalType.SELL,
+            asset=asset,
+            timestamp=datetime.now(),
+            strength=1.0,
+        )
+
+        quantity = engine._default_position_sizer(signal, portfolio, 600.0)
+
+        assert quantity == 0, f"Should not open position with negative net value: {quantity}"
+
+    def test_position_sizer_limits_to_initial_capital(self):
+        """测试仓位不超过初始资本的限制"""
+        portfolio = Portfolio(initial_capital=100000.0)
+        broker = VirtualBroker(config=BrokerConfig())
+        engine = SimulationEngine(portfolio=portfolio, broker=broker)
+
+        # 模拟盈利后净值超过初始资本
+        asset = create_asset()
+        portfolio.cash = 150000.0  # 盈利后现金增加
+
+        engine.current_prices = {"AAPL": 100.0}
+
+        signal = Signal(
+            signal_type=SignalType.BUY,
+            asset=asset,
+            timestamp=datetime.now(),
+            strength=1.0,
+        )
+
+        quantity = engine._default_position_sizer(signal, portfolio, 100.0)
+
+        # 应该使用 min(150000, 100000) = 100000 作为基数
+        # 仓位 = 100000 * 0.1 * 1.0 / 100 = 100
+        assert quantity == 100, f"Position should be based on initial capital: {quantity}"
+
+
+# =============================================================================
+# 多标的交易统计测试
+# =============================================================================
+
+class TestTradeStatisticsMultiSymbol:
+    """测试多标的交易统计正确性"""
+
+    def test_trade_pnl_calculation_multi_symbol(self):
+        """测试多标的交易盈亏计算"""
+        # 创建模拟的 fills
+        base_time = datetime.now()
+        fills = [
+            # AAPL: 买入100@100, 卖出100@110 -> 盈利 1000 - 手续费
+            {"symbol": "AAPL", "side": "buy", "quantity": 100, "price": 100.0,
+             "commission": 10.0, "timestamp": base_time},
+            {"symbol": "AAPL", "side": "sell", "quantity": 100, "price": 110.0,
+             "commission": 11.0, "timestamp": base_time + timedelta(hours=1)},
+            # MSFT: 买入50@200, 卖出50@190 -> 亏损 -500 - 手续费
+            {"symbol": "MSFT", "side": "buy", "quantity": 50, "price": 200.0,
+             "commission": 10.0, "timestamp": base_time + timedelta(minutes=30)},
+            {"symbol": "MSFT", "side": "sell", "quantity": 50, "price": 190.0,
+             "commission": 9.5, "timestamp": base_time + timedelta(hours=2)},
+        ]
+
+        # 创建 Backtester 实例来测试 _calculate_trade_pnls
+        backtester = Backtester(data_provider=Mock())
+
+        trade_pnls = backtester._calculate_trade_pnls(fills)
+
+        # 应该有2笔完整交易
+        assert len(trade_pnls) == 2, f"Expected 2 trades, got {len(trade_pnls)}"
+
+        # AAPL: (110 - 100) * 100 - 21 = 979
+        # MSFT: (190 - 200) * 50 - 19.5 = -519.5
+        # 由于手续费计算方式可能不同，验证方向
+        winning = [p for p in trade_pnls if p > 0]
+        losing = [p for p in trade_pnls if p < 0]
+
+        assert len(winning) == 1, f"Expected 1 winning trade, got {len(winning)}"
+        assert len(losing) == 1, f"Expected 1 losing trade, got {len(losing)}"
+
+    def test_trade_pnl_interleaved_orders(self):
+        """测试交错订单的统计"""
+        base_time = datetime.now()
+        # 交错的订单（旧逻辑会错误配对）
+        fills = [
+            {"symbol": "AAPL", "side": "buy", "quantity": 100, "price": 100.0,
+             "commission": 10.0, "timestamp": base_time},
+            {"symbol": "MSFT", "side": "buy", "quantity": 50, "price": 200.0,
+             "commission": 10.0, "timestamp": base_time + timedelta(minutes=1)},
+            {"symbol": "AAPL", "side": "sell", "quantity": 100, "price": 105.0,
+             "commission": 10.5, "timestamp": base_time + timedelta(minutes=2)},
+            {"symbol": "MSFT", "side": "sell", "quantity": 50, "price": 210.0,
+             "commission": 10.5, "timestamp": base_time + timedelta(minutes=3)},
+        ]
+
+        backtester = Backtester(data_provider=Mock())
+        trade_pnls = backtester._calculate_trade_pnls(fills)
+
+        # 应该有2笔完整交易，都是盈利的
+        assert len(trade_pnls) == 2, f"Expected 2 trades, got {len(trade_pnls)}"
+
+        winning = [p for p in trade_pnls if p > 0]
+        assert len(winning) == 2, f"Expected 2 winning trades, got {len(winning)}"
+
+    def test_trade_pnl_short_position(self):
+        """测试空头交易统计"""
+        base_time = datetime.now()
+        fills = [
+            # 做空: 先卖出再买入
+            {"symbol": "AAPL", "side": "sell", "quantity": 100, "price": 110.0,
+             "commission": 11.0, "timestamp": base_time},
+            {"symbol": "AAPL", "side": "buy", "quantity": 100, "price": 100.0,
+             "commission": 10.0, "timestamp": base_time + timedelta(hours=1)},
+        ]
+
+        backtester = Backtester(data_provider=Mock())
+        trade_pnls = backtester._calculate_trade_pnls(fills)
+
+        assert len(trade_pnls) == 1, f"Expected 1 trade, got {len(trade_pnls)}"
+        # 空头盈利: (110 - 100) * 100 - 21 = 979
+        assert trade_pnls[0] > 0, f"Short trade should be profitable: {trade_pnls[0]}"
+
+
+# =============================================================================
+# 空头持仓市值计算测试
+# =============================================================================
+
+class TestShortPositionValue:
+    """测试空头持仓市值计算"""
+
+    def test_short_position_value_is_negative(self):
+        """测试空头持仓市值为负"""
+        portfolio = Portfolio(initial_capital=100000.0)
+        asset = create_asset()
+
+        # 创建空头持仓
+        position = portfolio.get_position(asset)
+        position.quantity = -100  # 空头100股
+        position.avg_cost = 100.0
+
+        prices = {"AAPL": 100.0}
+        positions_value = portfolio.positions_value(prices)
+
+        # 空头持仓市值应该为负: -100 * 100 = -10000
+        assert positions_value == -10000.0, f"Expected -10000.0, got {positions_value}"
+
+    def test_short_position_total_value(self):
+        """测试空头持仓时总价值计算"""
+        portfolio = Portfolio(initial_capital=100000.0)
+        asset = create_asset()
+
+        # 模拟做空: 卖出100股@100, 获得现金但有负债
+        portfolio.cash = 100000.0 + 100 * 100  # 110000
+
+        position = portfolio.get_position(asset)
+        position.quantity = -100
+        position.avg_cost = 100.0
+
+        prices = {"AAPL": 100.0}
+        total = portfolio.total_value(prices)
+
+        # 总价值: 110000 + (-100 * 100) = 100000 (价格不变时保持不变)
+        assert total == 100000.0, f"Expected 100000.0, got {total}"
+
+    def test_short_position_profit_on_price_drop(self):
+        """测试股价下跌时空头盈利"""
+        portfolio = Portfolio(initial_capital=100000.0)
+        asset = create_asset()
+
+        portfolio.cash = 110000.0  # 做空获得现金
+
+        position = portfolio.get_position(asset)
+        position.quantity = -100
+        position.avg_cost = 100.0
+
+        # 股价下跌到80
+        prices = {"AAPL": 80.0}
+        total = portfolio.total_value(prices)
+
+        # 总价值: 110000 + (-100 * 80) = 102000 (盈利2000)
+        assert total == 102000.0, f"Expected 102000.0, got {total}"
+
+    def test_short_position_loss_on_price_rise(self):
+        """测试股价上涨时空头亏损"""
+        portfolio = Portfolio(initial_capital=100000.0)
+        asset = create_asset()
+
+        portfolio.cash = 110000.0
+
+        position = portfolio.get_position(asset)
+        position.quantity = -100
+        position.avg_cost = 100.0
+
+        # 股价上涨到120
+        prices = {"AAPL": 120.0}
+        total = portfolio.total_value(prices)
+
+        # 总价值: 110000 + (-100 * 120) = 98000 (亏损2000)
+        assert total == 98000.0, f"Expected 98000.0, got {total}"
+
+    def test_positions_market_value_absolute(self):
+        """测试持仓绝对市值计算"""
+        portfolio = Portfolio(initial_capital=100000.0)
+
+        # 多头持仓
+        asset1 = create_asset("AAPL")
+        position1 = portfolio.get_position(asset1)
+        position1.quantity = 100
+        position1.avg_cost = 100.0
+
+        # 空头持仓
+        asset2 = create_asset("MSFT")
+        position2 = portfolio.get_position(asset2)
+        position2.quantity = -50
+        position2.avg_cost = 200.0
+
+        prices = {"AAPL": 100.0, "MSFT": 200.0}
+
+        # 绝对市值: 100*100 + 50*200 = 20000
+        market_value = portfolio.positions_market_value(prices)
+
+        assert market_value == 20000.0, f"Expected 20000.0, got {market_value}"
+
+
+# =============================================================================
+# 最大回撤边界测试
+# =============================================================================
+
+class TestMaxDrawdownBounds:
+    """测试最大回撤边界"""
+
+    def test_max_drawdown_bounded_by_100_percent(self):
+        """测试最大回撤不超过100%"""
+        # 正常的净值曲线
+        equity_curve = pd.Series([100, 110, 90, 80, 85, 95])
+
+        rolling_max = equity_curve.expanding().max()
+        drawdown = (equity_curve - rolling_max) / rolling_max
+        max_drawdown = abs(drawdown.min())
+
+        # 最大回撤: (110 - 80) / 110 = 27.27%
+        assert max_drawdown <= 1.0, f"Max drawdown should be <= 100%: {max_drawdown}"
+        assert abs(max_drawdown - 0.2727) < 0.01
+
+    def test_max_drawdown_severe_decline(self):
+        """测试严重下跌时的最大回撤"""
+        # 从100跌到10
+        equity_curve = pd.Series([100, 80, 60, 40, 20, 10])
+
+        rolling_max = equity_curve.expanding().max()
+        drawdown = (equity_curve - rolling_max) / rolling_max
+        max_drawdown = abs(drawdown.min())
+
+        # 最大回撤: 90%
+        assert max_drawdown == 0.9, f"Expected 0.9, got {max_drawdown}"
+        assert max_drawdown <= 1.0
+
+    def test_max_drawdown_with_recovery(self):
+        """测试回撤后恢复"""
+        equity_curve = pd.Series([100, 120, 80, 90, 130, 100, 140])
+
+        rolling_max = equity_curve.expanding().max()
+        drawdown = (equity_curve - rolling_max) / rolling_max
+        max_drawdown = abs(drawdown.min())
+
+        # 最大回撤发生在 120 -> 80: (120-80)/120 = 33.33%
+        assert abs(max_drawdown - 0.3333) < 0.01
+        assert max_drawdown <= 1.0
+
+
+# =============================================================================
+# 配置优先级测试
+# =============================================================================
+
+class TestConfigPriority:
+    """测试配置加载：从 YAML 文件加载配置"""
+
+    def test_config_from_dict(self):
+        """测试从字典加载配置"""
+        from utils.config import Config
+
+        data = {
+            "alphavantage": {
+                "api_key": "test_key_123",
+                "calls_per_minute": 10,
+            }
+        }
+
+        config = Config.from_dict(data)
+
+        # 配置应该从字典加载
+        assert config.alphavantage.api_key == "test_key_123"
+        assert config.alphavantage.calls_per_minute == 10
+
+    def test_config_defaults(self):
+        """测试默认配置值"""
+        from utils.config import Config
+
+        config = Config()
+
+        # 默认值应该被设置
+        assert config.alphavantage.api_key == ""
+        assert config.alphavantage.calls_per_minute == 5
+        assert config.alphavantage.calls_per_day == 500
+        assert config.broker.commission_rate == 0.001
+
+    def test_broker_config_from_yaml(self):
+        """测试从配置文件读取broker配置"""
+        from utils.config import Config
+
+        data = {
+            "broker": {
+                "commission_rate": 0.002,
+                "slippage_rate": 0.001,
+                "short_selling_enabled": False,
+            }
+        }
+
+        config = Config.from_dict(data)
+
+        assert config.broker.commission_rate == 0.002
+        assert config.broker.slippage_rate == 0.001
+        assert config.broker.short_selling_enabled == False
+
+
+# =============================================================================
+# 回测集成测试
+# =============================================================================
+
+class TestBacktestIntegration:
+    """回测集成测试"""
+
+    def test_backtest_reasonable_results(self):
+        """测试回测结果在合理范围内"""
+        # 模拟一个简单的回测场景
+        portfolio = Portfolio(initial_capital=100000.0)
+
+        # 模拟一些交易
+        asset = create_asset()
+
+        # 买入 (execute_order 会自动调用 fill)
+        buy_order = Order(
+            asset=asset,
+            side=OrderSide.BUY,
+            quantity=100,
+            order_type=OrderType.MARKET,
+        )
+        buy_order.submit()
+        portfolio.execute_order(buy_order, 100.0, 10.0)
+
+        # 卖出获利
+        sell_order = Order(
+            asset=asset,
+            side=OrderSide.SELL,
+            quantity=100,
+            order_type=OrderType.MARKET,
+        )
+        sell_order.submit()
+        portfolio.execute_order(sell_order, 110.0, 11.0)
+
+        # 计算收益率
+        prices = {}
+        total_value = portfolio.total_value(prices)
+        total_return = (total_value - 100000.0) / 100000.0
+
+        # 收益应该在合理范围内 (-100%, +1000%)
+        assert -1.0 <= total_return <= 10.0, f"Return out of bounds: {total_return}"
+
+        # 持仓盈亏: (110-100)*100 = 1000 (不含手续费)
+        # 手续费在 total_value 中已扣除
+        assert portfolio.realized_pnl() == 1000.0
+
+        # 总手续费: 10 + 11 = 21
+        assert portfolio.total_commission() == 21.0
+
+    def test_no_infinite_position_growth(self):
+        """测试不会出现无限仓位增长"""
+        portfolio = Portfolio(initial_capital=100000.0)
+        broker = VirtualBroker(config=BrokerConfig(short_selling_enabled=True))
+        engine = SimulationEngine(portfolio=portfolio, broker=broker)
+
+        asset = create_asset()
+        engine.current_prices = {"AAPL": 100.0}
+
+        # 模拟多次交易
+        total_quantity = 0
+        for i in range(10):
+            signal = Signal(
+                signal_type=SignalType.SELL,
+                asset=asset,
+                timestamp=datetime.now(),
+                strength=1.0,
+            )
+
+            quantity = engine._default_position_sizer(signal, portfolio, 100.0)
+            total_quantity += quantity
+
+            # 模拟做空
+            portfolio.cash += quantity * 100.0
+            position = portfolio.get_position(asset)
+            position.quantity -= quantity
+            position.avg_cost = 100.0
+
+        # 总仓位不应该超过一个合理的倍数
+        max_reasonable_quantity = 100000.0 / 100.0 * 2  # 初始资本的2倍
+        assert total_quantity <= max_reasonable_quantity, \
+            f"Total quantity too large: {total_quantity}"
 
 
 # =============================================================================

@@ -11,7 +11,8 @@
 用法：
   python python/scripts/merge_cache.py              # 预览合并计划
   python python/scripts/merge_cache.py --execute    # 执行合并
-  python python/scripts/merge_cache.py --dry-run    # 详细预览（显示数据统计）
+  python python/scripts/merge_cache.py --dry-run    # 详细预览（显示数据统计和合并后预期）
+  python python/scripts/merge_cache.py --dry-run -s AAPL  # 只查看指定标的
 """
 
 import asyncio
@@ -31,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "alchemist"))
 
 from data.cache.sqlite_cache import SQLiteCache
 from data.models import MarketData, OHLCV
+from utils.config import get_data_cache_path
 
 console = Console()
 app = typer.Typer(help="缓存合并工具")
@@ -146,12 +148,56 @@ async def merge_cache_entries(
     return new_key, len(sorted_ohlcv), original_total
 
 
+async def preview_merged_result(
+    cache: SQLiteCache,
+    entries: List[Tuple[str, dict]],
+) -> dict:
+    """
+    预览合并后的结果，不实际执行合并
+
+    Returns:
+        {
+            "query_start": str,  # 查询范围起始
+            "query_end": str,    # 查询范围结束
+            "data_start": str,   # 实际数据起始
+            "data_end": str,     # 实际数据结束
+            "total_count": int,  # 原始数据总数
+            "merged_count": int, # 去重后数据数
+        }
+    """
+    all_ohlcv = {}  # 使用 timestamp 作为键去重
+    total_count = 0
+    query_starts = []
+    query_ends = []
+
+    for key, info in entries:
+        query_starts.append(info["start_date"])
+        query_ends.append(info["end_date"])
+
+        data = await cache.get(key)
+        if data and isinstance(data, MarketData):
+            total_count += len(data.data)
+            for ohlcv in data.data:
+                all_ohlcv[ohlcv.timestamp] = ohlcv
+
+    sorted_ohlcv = sorted(all_ohlcv.values(), key=lambda x: x.timestamp)
+
+    return {
+        "query_start": format_date(min(query_starts)),
+        "query_end": format_date(max(query_ends)),
+        "data_start": sorted_ohlcv[0].timestamp.strftime("%Y-%m-%d") if sorted_ohlcv else None,
+        "data_end": sorted_ohlcv[-1].timestamp.strftime("%Y-%m-%d") if sorted_ohlcv else None,
+        "total_count": total_count,
+        "merged_count": len(sorted_ohlcv),
+    }
+
+
 @app.command()
 def main(
     db_path: str = typer.Option(
-        "./data/cache/market_data.db",
+        "",
         "--db", "-d",
-        help="缓存数据库路径"
+        help="缓存数据库路径（默认: {project_root}/data/cache/market_data.db）"
     ),
     execute: bool = typer.Option(
         False,
@@ -163,17 +209,33 @@ def main(
         "--dry-run", "-n",
         help="详细预览模式，显示数据统计"
     ),
+    symbol: str = typer.Option(
+        None,
+        "--symbol", "-s",
+        help="指定标的（如 AAPL），默认显示全部"
+    ),
 ):
     """合并相同 Symbol 的缓存条目"""
 
     async def run():
-        cache = SQLiteCache(db_path=db_path)
+        resolved_path = db_path or get_data_cache_path()
+        cache = SQLiteCache(db_path=resolved_path)
         await cache._ensure_initialized()
 
-        console.print(f"\n[bold]缓存数据库:[/bold] {db_path}\n")
+        console.print(f"\n[bold]缓存数据库:[/bold] {resolved_path}\n")
 
         # 分析缓存
         mergeable = await analyze_cache(cache)
+
+        # 按 symbol 过滤
+        if symbol:
+            mergeable = {
+                k: v for k, v in mergeable.items()
+                if k[1].upper() == symbol.upper()
+            }
+            if not mergeable:
+                console.print(f"[yellow]没有找到标的 {symbol} 的可合并条目[/yellow]")
+                return
 
         if not mergeable:
             console.print("[green]✓ 没有需要合并的缓存条目[/green]")
@@ -186,13 +248,13 @@ def main(
         table.add_column("条目数", justify="right")
         table.add_column("缓存键", style="dim")
 
-        for (provider, symbol, interval), entries in mergeable.items():
+        for (provider, sym, interval), entries in mergeable.items():
             keys_display = "\n".join([
                 f"  {info['key']} ({info['count']} 条)"
                 for _, info in entries
             ])
             table.add_row(
-                symbol,
+                sym,
                 interval,
                 str(len(entries)),
                 keys_display,
@@ -203,14 +265,26 @@ def main(
         if dry_run:
             # 详细预览
             console.print("\n[bold]详细数据统计:[/bold]")
-            for (provider, symbol, interval), entries in mergeable.items():
-                console.print(f"\n[cyan]{symbol}[/cyan] ({interval}):")
+            for (provider, sym, interval), entries in mergeable.items():
+                console.print(f"\n[cyan]{sym}[/cyan] ({interval}):")
+
+                # 显示各条目信息
+                console.print("  [dim]现有条目:[/dim]")
                 for _, info in entries:
                     console.print(
-                        f"  • {info['key']}\n"
-                        f"    查询范围: {format_date(info['start_date'])} ~ {format_date(info['end_date'])}\n"
-                        f"    实际数据: {info['data_start']} ~ {info['data_end']} ({info['count']} 条)"
+                        f"    • {info['key']}\n"
+                        f"      查询范围: {format_date(info['start_date'])} ~ {format_date(info['end_date'])}\n"
+                        f"      实际数据: {info['data_start']} ~ {info['data_end']} ({info['count']} 条)"
                     )
+
+                # 计算并显示合并后的预期结果
+                merged_preview = await preview_merged_result(cache, entries)
+                console.print("  [bold green]合并后预期:[/bold green]")
+                console.print(
+                    f"    查询范围: {merged_preview['query_start']} ~ {merged_preview['query_end']}\n"
+                    f"    实际数据: {merged_preview['data_start']} ~ {merged_preview['data_end']} "
+                    f"({merged_preview['merged_count']} 条，去重 {merged_preview['total_count'] - merged_preview['merged_count']} 条)"
+                )
 
         if not execute:
             console.print(
@@ -222,17 +296,17 @@ def main(
         # 执行合并
         console.print("\n[bold]执行合并...[/bold]\n")
 
-        for (provider, symbol, interval), entries in mergeable.items():
+        for (provider, sym, interval), entries in mergeable.items():
             keys = [info["key"] for _, info in entries]
             original_count = sum(info["count"] for _, info in entries)
 
             new_key, merged_count, _ = await merge_cache_entries(
-                cache, keys, provider, symbol, interval
+                cache, keys, provider, sym, interval
             )
 
             if new_key:
                 console.print(
-                    f"[green]✓[/green] {symbol} ({interval}): "
+                    f"[green]✓[/green] {sym} ({interval}): "
                     f"{len(keys)} 条目合并为 1 条 "
                     f"({original_count} → {merged_count} 条数据，去重 {original_count - merged_count} 条)"
                 )

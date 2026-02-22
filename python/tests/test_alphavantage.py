@@ -2,11 +2,11 @@
 Alpha Vantage 美股数据连通性测试
 
 测试通过 Alpha Vantage API 获取美股市场数据的连通性，验证各接口返回字段的完整性与正确性。
-API Key 通过 conftest.py 自动从 .env 文件加载，无需手动设置环境变量。
+API Key 通过 conftest.py 自动从 config/config.yaml 加载，无需手动设置环境变量。
 
 限流说明：
-    AlphaVantageProvider 内置类级别共享限流器，从 .env 读取
-    ALPHAVANTAGE_CALLS_PER_MINUTE / ALPHAVANTAGE_CALLS_PER_DAY 配置，
+    AlphaVantageProvider 内置类级别共享限流器，从 config/config.yaml 读取
+    alphavantage.calls_per_minute / alphavantage.calls_per_day 配置，
     所有 provider 实例共享同一限流器，测试无需额外处理限流。
 
 用法:
@@ -21,6 +21,7 @@ from datetime import datetime, timedelta
 from data.providers.alphavantage import AlphaVantageProvider
 from data.providers import DataInterval
 from data.models import MarketData, OHLCV
+from alchemist.utils.config import get_config
 
 # 美股测试标的
 SYMBOL_AAPL = "AAPL"    # Apple Inc.
@@ -30,8 +31,11 @@ SYMBOL_GOOGL = "GOOGL"  # Alphabet Inc.
 
 @pytest.fixture
 def provider():
-    """创建 AlphaVantageProvider 实例"""
-    return AlphaVantageProvider()
+    """创建 AlphaVantageProvider 实例，从配置文件获取 API key"""
+    config = get_config()
+    api_key = config.alphavantage.api_key
+    plan = config.alphavantage.plan
+    return AlphaVantageProvider(api_key=api_key, plan=plan)
 
 
 def run_async(coro):
