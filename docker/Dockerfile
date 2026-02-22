@@ -5,6 +5,7 @@ FROM nvidia/cuda:12.2.0-devel-ubuntu22.04
 
 # 设置环境变量
 ENV DEBIAN_FRONTEND=noninteractive
+ENV TZ=Asia/Shanghai
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PIP_NO_CACHE_DIR=1
@@ -17,6 +18,7 @@ WORKDIR /workspace
 
 # 安装系统依赖
 RUN apt-get update && apt-get install -y --no-install-recommends \
+    tzdata \
     python3.11 \
     python3.11-dev \
     python3.11-venv \
@@ -35,6 +37,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libhdf5-dev \
     pkg-config \
     && rm -rf /var/lib/apt/lists/*
+
+# 设置时区为 Asia/Shanghai
+RUN ln -sf /usr/share/zoneinfo/Asia/Shanghai /etc/localtime \
+    && echo "Asia/Shanghai" > /etc/timezone
 
 # 设置 Python 3.11 为默认
 RUN update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
@@ -114,7 +120,9 @@ RUN pip install torch==2.1.1 --index-url https://download.pytorch.org/whl/cu121
 RUN pip install \
     fastapi==0.109.0 \
     uvicorn[standard]==0.27.0 \
-    python-multipart==0.0.6
+    python-multipart==0.0.6 \
+    bcrypt==4.2.1 \
+    itsdangerous==2.2.0
 
 # 创建非 root 用户
 RUN useradd -m -s /bin/bash developer \

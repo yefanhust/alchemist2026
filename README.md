@@ -87,15 +87,15 @@ alchemist2026/
 │   └── notebooks/                   # Jupyter notebooks
 │       └── examples/
 ├── config/                          # 配置文件
-│   ├── default.yaml
+│   ├── config.yaml                  # 用户配置（包含敏感信息，不提交到 Git）
+│   ├── default.yaml.example         # 配置模板
 │   └── strategies/
 ├── data/                            # 数据存储
 │   ├── cache/                       # 缓存数据库
 │   └── output/                      # 输出结果
 ├── logs/                            # 日志文件
 ├── requirements.txt
-├── setup.py
-└── .env.example
+└── setup.py
 ```
 
 ## 核心模块说明
@@ -131,6 +131,83 @@ alchemist2026/
 - **数据可视化**: K线图、成交量图、多资产对比
 - **REST API**: 缓存统计、市场数据查询
 - **HTTPS**: 自签名证书，支持 Cloudflare 代理
+
+## 数据库表结构
+
+系统使用 SQLite 数据库（`data/cache/market_data.db`）持久化缓存数据，包含以下三张业务表：
+
+### cache_entries — 通用缓存表
+
+| 列 | 类型 | 说明 |
+|----|------|------|
+| `key` | TEXT (PK) | 缓存键，格式：`{provider}:{symbol}:{interval}:{start}:{end}` |
+| `value` | BLOB | 序列化数据（MarketData 用 JSON，其他用 pickle） |
+| `data_type` | TEXT | 值类型标记：`market_data` / `pickle` |
+| `expires_at` | TIMESTAMP | 过期时间（NULL 表示永不过期） |
+| `created_at` | TIMESTAMP | 创建时间 |
+
+- **写入方**：`AlphaVantageProvider.get_historical_data()` 通过 `cache.set(key, data)` 写入
+- **读取方**：Provider 缓存命中时读取；Web 仪表盘作为 fallback 数据源
+- **特点**：粗粒度存储，一个 key 对应一整段时间范围的完整 `MarketData` 对象（JSON blob）
+- **示例 key**：`alphavantage:GLD:1d:20240101:20251231`
+
+### market_data — OHLCV 时序数据表
+
+| 列 | 类型 | 说明 |
+|----|------|------|
+| `id` | INTEGER (PK) | 自增主键 |
+| `symbol` | TEXT | 资产代码（如 GLD、SPY） |
+| `interval` | TEXT | 数据间隔（如 1d、1h） |
+| `timestamp` | TIMESTAMP | K 线时间戳 |
+| `open` | REAL | 开盘价 |
+| `high` | REAL | 最高价 |
+| `low` | REAL | 最低价 |
+| `close` | REAL | 收盘价 |
+| `volume` | REAL | 成交量 |
+| `adjusted_close` | REAL | 复权收盘价 |
+| `created_at` | TIMESTAMP | 写入时间 |
+
+- **写入方**：`AlphaVantageProvider.get_historical_data()` 通过 `cache.save_market_data()` 写入
+- **读取方**：Web 仪表盘（K 线图、多资产对比、symbol 列表）优先从此表查询
+- **特点**：细粒度存储，每行一根 K 线，支持按 symbol + 日期范围高效查询
+- **唯一约束**：`(symbol, interval, timestamp)`，相同数据点自动覆盖更新
+
+### stock_info — 股票元数据表
+
+| 列 | 类型 | 说明 |
+|----|------|------|
+| `symbol` | TEXT (PK) | 股票代码 |
+| `name` | TEXT | 公司名称 |
+| `exchange` | TEXT | 交易所（NYSE、NASDAQ 等） |
+| `sector` | TEXT | 行业大类（Technology、Healthcare 等） |
+| `industry` | TEXT | 细分行业（Software、Biotechnology 等） |
+| `market_cap` | REAL | 市值 |
+| `pe_ratio` | REAL | 市盈率 |
+| ... | | 其他基本面字段 |
+
+- **写入方**：`datasource_info.py fetch-sector-info` 从 Alpha Vantage OVERVIEW API 获取并缓存
+- **读取方**：`list-assets --sector/--industry` 按行业筛选、Web 仪表盘
+- **特点**：按需积累，已缓存的 symbol 不会重复调用 API
+
+### 表间关系与数据流
+
+```
+Alpha Vantage API
+       │
+       ▼
+AlphaVantageProvider.get_historical_data()
+       │
+       ├──► cache.set(key, MarketData)      ──► cache_entries   (通用缓存，回测读取)
+       │
+       └──► cache.save_market_data(symbol)   ──► market_data     (时序表，Web 仪表盘读取)
+
+Alpha Vantage OVERVIEW API
+       │
+       ▼
+datasource_info.py fetch-sector-info
+       │
+       └──► cache.save_stock_info(symbol)    ──► stock_info      (元数据，行业筛选)
+```
 
 ## 快速开始
 
@@ -247,10 +324,13 @@ for i in range(torch.cuda.device_count()):
 ```
 
 ### 2. 配置 API Key 及环境
-#### 2.1 API Key
+#### 2.1 配置文件
 ```bash
-cp .env.example .env
-# 编辑 .env 文件，填入 Alpha Vantage API Key
+# 复制配置模板
+cp config/default.yaml.example config/config.yaml
+
+# 编辑 config/config.yaml，填入 Alpha Vantage API Key 和其他敏感配置
+# 注意：config/config.yaml 已加入 .gitignore，不会被提交到 Git
 ```
 
 #### 2.2 环境变量
@@ -319,6 +399,129 @@ python python/scripts/datasource_info.py --help
 - **数据间隔** — 1min ~ 月线
 - **API 限流策略** — 当前 plan 及对应的频率/每日上限
 
+#### 4.1 列出全部支持标的
+
+使用 `list-assets` 命令按类型列出数据源支持的全部标的（股票、ETF、外汇、加密货币）。
+
+```bash
+# 列出股票（默认显示前 50 条）
+python python/scripts/datasource_info.py list-assets stock
+
+# 列出 ETF，显示 100 条
+python python/scripts/datasource_info.py list-assets etf --limit 100
+
+# 列出外汇货币
+python python/scripts/datasource_info.py list-assets forex
+
+# 列出加密货币，按关键词过滤
+python python/scripts/datasource_info.py list-assets crypto --filter BTC
+
+# 按交易所过滤（仅 stock/etf）
+python python/scripts/datasource_info.py list-assets stock --exchange NASDAQ
+
+# 分页查看（跳过前 50 条，显示接下来 50 条）
+python python/scripts/datasource_info.py list-assets stock --offset 50 --limit 50
+
+# 导出全部数据到 CSV 文件
+python python/scripts/datasource_info.py list-assets stock --export stocks.csv
+python python/scripts/datasource_info.py list-assets crypto --export crypto.csv
+```
+
+**支持的资产类型**：
+
+| 类型 | 说明 | 数据来源 |
+|-----|------|---------|
+| `stock` | 股票（美股、A 股、多国市场） | Alpha Vantage LISTING_STATUS API |
+| `etf` | 交易所交易基金 | Alpha Vantage LISTING_STATUS API |
+| `forex` | 外汇货币（物理货币） | Alpha Vantage physical_currency_list |
+| `crypto` | 加密货币（数字货币） | Alpha Vantage digital_currency_list |
+
+**命令参数**：
+
+| 参数 | 说明 | 默认值 |
+|-----|------|-------|
+| `--limit, -n` | 显示数量限制 | 50 |
+| `--offset` | 跳过前 N 条记录 | 0 |
+| `--filter, -f` | 按关键词过滤（代码或名称） | - |
+| `--exchange, -e` | 按交易所过滤（仅 stock/etf） | - |
+| `--sector` | 按行业大类过滤（如 Technology, Healthcare） | - |
+| `--industry` | 按细分行业过滤（如 Software, Biotechnology） | - |
+| `--export` | 导出到 CSV 文件路径 | - |
+| `--refresh` | 强制从 API 刷新行业信息（忽略缓存） | false |
+
+#### 4.2 按行业过滤股票
+
+使用 `--sector` 和 `--industry` 参数按行业筛选股票。首次查询会从 Alpha Vantage OVERVIEW API 获取行业信息，并自动缓存到本地 SQLite 数据库。
+
+```bash
+# 按行业大类过滤（如 Technology、Healthcare、Financial Services）
+python python/scripts/datasource_info.py list-assets stock --sector Technology
+
+# 按细分行业过滤（如 Software、Biotechnology、Banks）
+python python/scripts/datasource_info.py list-assets stock --industry Software
+
+# 组合过滤：科技行业中的软件公司
+python python/scripts/datasource_info.py list-assets stock --sector Technology --industry Software
+
+# 结合交易所过滤：NASDAQ 上的科技股
+python python/scripts/datasource_info.py list-assets stock --exchange NASDAQ --sector Technology
+
+# 强制刷新行业信息（忽略本地缓存）
+python python/scripts/datasource_info.py list-assets stock --sector Technology --refresh
+
+# 导出某行业的全部股票到 CSV
+python python/scripts/datasource_info.py list-assets stock --sector Healthcare --export healthcare_stocks.csv
+```
+
+**常用行业分类（Sector）**：
+
+| Sector | 说明 |
+|--------|------|
+| Technology | 科技 |
+| Healthcare | 医疗健康 |
+| Financial Services | 金融服务 |
+| Consumer Cyclical | 可选消费 |
+| Consumer Defensive | 必需消费 |
+| Industrials | 工业 |
+| Energy | 能源 |
+| Basic Materials | 基础材料 |
+| Real Estate | 房地产 |
+| Utilities | 公用事业 |
+| Communication Services | 通信服务 |
+
+**批量获取行业信息并缓存**：
+
+使用 `fetch-sector-info` 命令主动批量获取股票行业信息。建议先用 `--exchange` 缩小范围：
+
+```bash
+# 获取 NASDAQ 前 100 只股票的行业信息
+python python/scripts/datasource_info.py fetch-sector-info --exchange NASDAQ --limit 100
+
+# 获取 NYSE 前 200 只
+python python/scripts/datasource_info.py fetch-sector-info --exchange NYSE --limit 200
+
+# 继续获取（跳过已获取的）
+python python/scripts/datasource_info.py fetch-sector-info --exchange NASDAQ --offset 100 --limit 100
+
+# 按关键词过滤后获取
+python python/scripts/datasource_info.py fetch-sector-info --filter AAPL --limit 10
+```
+
+**查看已缓存的行业列表**：
+
+```bash
+# 列出本地缓存中的所有行业分类
+python python/scripts/datasource_info.py list-sectors
+```
+
+**缓存机制说明**：
+
+- 行业信息缓存在 `./data/cache/stock_info.db`
+- `list-assets --sector/--industry` 直接从缓存查询，秒级返回
+- 使用 `fetch-sector-info` 命令主动积累缓存
+- Premium 版本限流 75 次/分钟（0.8秒间隔），Free 版本 5 次/分钟（12秒间隔）
+- 已缓存的股票不会重复调用 API
+
 > **扩展数据源**：新增 DataProvider 实现后，只需在 `datasource_info.py` 的 `DATA_SOURCE_REGISTRY` 中注册即可被脚本自动识别。
 
 ### 5. 缓存管理
@@ -368,7 +571,7 @@ python python/scripts/merge_cache.py --db ./data/cache/market_data.db --execute
 
 ### 6. 运行测试
 
-测试框架会自动从项目根目录的 `.env` 文件加载 `ALPHAVANTAGE_API_KEY` 等环境变量，无需手动 export。
+测试框架会自动从 `config/config.yaml` 加载配置（包括 `alphavantage.api_key` 等），无需手动设置环境变量。
 
 #### 6.1 Pytest 常用参数
 
@@ -516,7 +719,7 @@ pytest python/tests/ -v --tb=short
 pytest python/tests/ -v -x
 ```
 
-> **说明**：如果 `.env` 中未配置 `ALPHAVANTAGE_API_KEY`，Alpha Vantage 相关测试会自动跳过。
+> **说明**：如果 `config/config.yaml` 中未配置 `alphavantage.api_key`，Alpha Vantage 相关测试会自动跳过。
 
 ### 端口映射
 
@@ -629,6 +832,144 @@ python/alchemist/web/
 │   └── charts/
 └── ssl/                     # SSL 证书
 ```
+
+### 8. 黄金策略参数优化
+
+使用差分进化算法（Differential Evolution）对黄金择时增强型定投策略的全部参数进行全局优化，包括因子权重、阈值、倍率和强制止盈等 16 个参数。默认使用全部 CPU 核心并行加速。
+
+#### 8.1 运行优化
+
+```bash
+# 默认参数（3年数据，种群20，50代，全部CPU核心并行）
+python python/scripts/run_backtest.py optimize-gold
+
+# 自定义参数
+python python/scripts/run_backtest.py optimize-gold \
+    --start 2011-01-04 --end 2025-12-31 \
+    --popsize 30 --maxiter 100 --seed 42
+
+# 指定并行 worker 数量（默认 -1 = 全部核心）
+python python/scripts/run_backtest.py optimize-gold --workers 48
+
+# 串行模式（调试用，保留逐次评估日志）
+python python/scripts/run_backtest.py optimize-gold --workers 1
+
+# 建议使用 tee 保留终端输出，防止 SSH 断连丢失结果
+python python/scripts/run_backtest.py optimize-gold \
+    --start 2011-01-04 --end 2025-12-31 2>&1 | tee optimize.log
+```
+
+**优化参数说明**：
+
+| 参数 | 说明 | 默认值 |
+|-----|------|-------|
+| `--start` | 数据起始日期 | 当前日期 - 3年 |
+| `--end` | 数据截止日期 | 当前日期 |
+| `--popsize` | 差分进化种群大小 | 20 |
+| `--maxiter` | 最大迭代代数 | 50 |
+| `--train-ratio` | 训练集比例（Walk-forward 验证） | 0.7 |
+| `--seed` | 随机种子（可复现） | 42 |
+| `--workers` / `-w` | 并行 worker 数量（1=串行，-1=全部CPU核心） | -1 |
+
+**并行加速说明**：
+
+优化使用 `multiprocessing.Pool` 进行 CPU 多核并行，种群中各个体的回测评估在不同核心上同时运行。每个 worker 进程在启动时通过初始化器接收市场数据（只传输一次），避免每次评估的序列化开销。
+
+- 串行模式（`--workers 1`）：逐次评估，每次发现新最优时打印日志
+- 并行模式（默认）：按代追踪进度，每代结束后打印最优 fitness 和收敛度
+
+#### 8.2 Checkpoint 与结果保存
+
+优化过程中每次发现更优解都会自动保存 checkpoint，即使进程中断也不会丢失进度：
+
+```
+data/output/
+├── checkpoints/
+│   └── checkpoint_best.yaml    # 中间最优 checkpoint（实时更新）
+└── gold_optimized_params.yaml  # 最终优化结果（优化完成后写入）
+```
+
+**checkpoint_best.yaml** 示例：
+
+```yaml
+checkpoint_at: "2026-02-22 10:30:00"
+eval_count: 3200
+elapsed_seconds: 5400.0
+fitness: 0.1856
+train_return: 0.2341
+train_sharpe: 1.52
+params:
+  w_technical: 0.3512
+  w_cross_market: 0.2891
+  ...
+```
+
+**gold_optimized_params.yaml**（最终结果）示例：
+
+```yaml
+optimized_at: "2026-02-22 12:00:00"
+fitness: 0.2034
+n_evaluations: 16000
+elapsed_seconds: 28800.0
+params:
+  w_technical: 0.3512
+  w_cross_market: 0.2891
+  w_sentiment: 0.0823
+  w_macro: 0.2774
+  thresh_boost: 0.2456
+  thresh_normal: 0.0312
+  thresh_reduce: -0.1089
+  thresh_skip: -0.2567
+  thresh_sell: -0.5234
+  boost_multiplier: 2.15
+  reduce_multiplier: 0.42
+  sell_fraction: 0.55
+  buy_day: 3
+  force_sell_interval: 210
+  force_sell_fraction: 0.25
+  force_sell_profit_thresh: 0.08
+performance:
+  train:
+    total_return: 0.2341
+    annual_return: 0.1023
+    sharpe_ratio: 1.52
+    ...
+  validation:
+    total_return: 0.1856
+    ...
+  full:
+    total_return: 0.2134
+    ...
+  benchmark:
+    total_return: 0.1567
+    ...
+```
+
+#### 8.3 使用优化参数运行回测
+
+优化完成后，`gold-backtest` 命令会**自动加载**优化参数：
+
+```bash
+# 自动加载 data/output/gold_optimized_params.yaml（如果存在）
+python python/scripts/run_backtest.py gold-backtest
+
+# 手动指定参数文件
+python python/scripts/run_backtest.py gold-backtest \
+    --optimized-params data/output/gold_optimized_params.yaml
+
+# 从 checkpoint 恢复使用（优化中断时）
+python python/scripts/run_backtest.py gold-backtest \
+    --optimized-params data/output/checkpoints/checkpoint_best.yaml
+
+# 不使用优化参数，使用默认参数
+python python/scripts/run_backtest.py gold-backtest --no-optimized
+```
+
+#### 8.4 防过拟合措施
+
+- **Walk-forward 验证**：数据按 `train_ratio`（默认 70%）分割为训练集和验证集，仅在训练集上优化，验证集评估泛化能力
+- **交易频率惩罚**：买入过少（<10次/年）或过多（>100次/年）均扣分
+- **过拟合检测**：优化完成后自动对比训练集与验证集适应度比值，给出过拟合警告
 
 ## GPU 加速说明
 

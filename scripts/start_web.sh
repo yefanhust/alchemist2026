@@ -4,6 +4,14 @@
 
 set -e
 
+# 加载 .env 文件（如果存在）
+ENV_FILE="/workspace/docker/.env"
+if [ -f "$ENV_FILE" ]; then
+    set -a
+    source "$ENV_FILE"
+    set +a
+fi
+
 SSL_DIR="/workspace/python/alchemist/web/ssl"
 CERT="$SSL_DIR/cert.pem"
 KEY="$SSL_DIR/key.pem"

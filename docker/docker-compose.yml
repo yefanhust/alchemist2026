@@ -18,6 +18,8 @@ services:
               capabilities: [gpu]
     
     # 环境变量
+    env_file:
+      - .env
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - CUDA_VISIBLE_DEVICES=0,1
