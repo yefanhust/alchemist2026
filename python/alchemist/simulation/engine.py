@@ -138,20 +138,27 @@ class SimulationEngine:
         current_price: float,
     ) -> float:
         """
-        默认仓位计算：使用可用资金的10%
-        
+        默认仓位计算：使用净值的10%
+
         Args:
             signal: 交易信号
             portfolio: 投资组合
             current_price: 当前价格
-            
+
         Returns:
             交易数量
         """
-        available_cash = portfolio.cash
-        position_value = available_cash * 0.1 * signal.strength
+        # 使用净值而非现金，避免做空时仓位无限膨胀
+        net_value = portfolio.total_value(self.current_prices)
+        # 确保净值为正，避免负净值时开仓
+        if net_value <= 0:
+            return 0
+
+        # 使用初始资本和当前净值的较小值，防止杠杆过大
+        base_value = min(net_value, portfolio.initial_capital)
+        position_value = base_value * 0.1 * signal.strength
         quantity = position_value / current_price
-        
+
         # 四舍五入到整数
         return max(1, int(quantity))
     
@@ -162,28 +169,29 @@ class SimulationEngine:
     ) -> None:
         """
         处理市场数据更新
-        
+
         Args:
             symbol: 资产代码
             ohlcv: OHLCV 数据
         """
         self.current_timestamp = ohlcv.timestamp
         self.current_prices[symbol] = ohlcv.close
-        
+
         # 更新市场数据缓存
         if symbol not in self.market_data:
             self.market_data[symbol] = MarketData(symbol=symbol)
         self.market_data[symbol].append(ohlcv)
-        
+
         # 触发事件
         self._emit_event(Event(
             event_type=EventType.MARKET_DATA,
             timestamp=ohlcv.timestamp,
             data={"symbol": symbol, "ohlcv": ohlcv},
         ))
-        
-        # 处理待处理订单
-        self.broker.process_orders(self.portfolio, ohlcv)
+
+        # 只处理与当前 symbol 匹配的待处理订单，
+        # 避免订单被错误地用其他 symbol 的价格成交
+        self.broker.process_orders(self.portfolio, ohlcv, symbol=symbol)
     
     def process_strategies(self) -> List[Signal]:
         """
@@ -291,8 +299,8 @@ class SimulationEngine:
     
     def on_day_end(self) -> None:
         """日终处理"""
-        # 记录组合快照
-        self.portfolio.record_daily(self.current_prices)
+        # 记录组合快照（使用模拟时间而非真实时间）
+        self.portfolio.record_daily(self.current_prices, timestamp=self.current_timestamp)
         
         self._emit_event(Event(
             event_type=EventType.DAY_END,
@@ -352,18 +360,20 @@ class SimulationEngine:
         
         # 逐时间步处理
         last_date = None
-        
+
         for timestamp in sorted_timestamps:
-            # 处理每个资产的数据
-            for symbol, ohlcv in symbol_data[timestamp].items():
-                self.step(symbol, ohlcv)
-            
-            # 检查是否是新的一天
             current_date = timestamp.date()
+
+            # 在处理新一天的数据之前，先完成前一天的日终快照
+            # （此时 current_prices 仍为前一天的收盘价，保证快照正确）
             if last_date is not None and current_date != last_date:
                 self.on_day_end()
             last_date = current_date
-            
+
+            # 处理每个资产的数据
+            for symbol, ohlcv in symbol_data[timestamp].items():
+                self.step(symbol, ohlcv)
+
             # 步骤回调
             if on_step:
                 on_step(timestamp)

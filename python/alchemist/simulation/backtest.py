@@ -47,16 +47,23 @@ class BacktestResult:
     
     # 交易统计
     total_trades: int = 0
+    buy_count: int = 0                  # 总买入次数
+    sell_count: int = 0                 # 总卖出次数
+    total_invested: float = 0.0         # 累计买入金额
     winning_trades: int = 0
     losing_trades: int = 0
     win_rate: float = 0.0
     avg_win: float = 0.0
     avg_loss: float = 0.0
     profit_factor: float = 0.0          # 盈亏比
-    
+
+    # 投资期限
+    first_trade_date: Optional[datetime] = None   # 首次交易日期
+    last_trade_date: Optional[datetime] = None    # 最后交易日期
+
     # 费用
     total_commission: float = 0.0
-    
+
     # 详细数据
     equity_curve: pd.DataFrame = field(default_factory=pd.DataFrame)
     trade_history: List[Dict[str, Any]] = field(default_factory=list)
@@ -83,7 +90,9 @@ class BacktestResult:
 最大回撤持续: {self.max_drawdown_duration} 天
 
 【交易统计】
-总交易次数: {self.total_trades}
+总买入: {self.buy_count} 次  总卖出: {self.sell_count} 次
+总投入: ${self.total_invested:,.2f}
+投资期限: {self._format_invest_period()}
 盈利交易: {self.winning_trades} ({self.win_rate:.1%})
 亏损交易: {self.losing_trades}
 平均盈利: ${self.avg_win:,.2f}
@@ -93,6 +102,29 @@ class BacktestResult:
 ==============================
         """
     
+    @property
+    def invest_months(self) -> int:
+        """计算回测期限总月数（基于 start_date/end_date）"""
+        delta = self.end_date - self.start_date
+        return max(1, round(delta.days / 30.44))
+
+    def _format_invest_period(self) -> str:
+        """格式化回测期限（基于 start_date/end_date，确保跨策略可比）"""
+        months = self.invest_months
+        start = self.start_date.strftime("%Y%m%d")
+        end = self.end_date.strftime("%Y%m%d")
+        return f"{months}月 ({start}~{end})"
+
+    def _format_trade_period(self) -> str:
+        """格式化实际交易期限（首次交易到最后交易）"""
+        if self.first_trade_date and self.last_trade_date:
+            start = self.first_trade_date.strftime("%Y%m%d")
+            end = self.last_trade_date.strftime("%Y%m%d")
+            delta = self.last_trade_date - self.first_trade_date
+            months = max(1, round(delta.days / 30.44))
+            return f"{months}月 ({start}~{end})"
+        return "无交易"
+
     def to_dict(self) -> Dict[str, Any]:
         """转换为字典"""
         return {
@@ -109,6 +141,11 @@ class BacktestResult:
             "max_drawdown": self.max_drawdown,
             "max_drawdown_duration": self.max_drawdown_duration,
             "total_trades": self.total_trades,
+            "buy_count": self.buy_count,
+            "sell_count": self.sell_count,
+            "total_invested": self.total_invested,
+            "first_trade_date": self.first_trade_date.isoformat() if self.first_trade_date else None,
+            "last_trade_date": self.last_trade_date.isoformat() if self.last_trade_date else None,
             "winning_trades": self.winning_trades,
             "losing_trades": self.losing_trades,
             "win_rate": self.win_rate,
@@ -178,6 +215,7 @@ class Backtester:
         )
         
         # 记录数据状态
+        actual_start_dates = []
         for symbol, market_data in data.items():
             if market_data.is_empty:
                 logger.warning(f"{symbol}: 无数据")
@@ -187,7 +225,21 @@ class Backtester:
                     f"{market_data.start_date.strftime('%Y-%m-%d')} 至 "
                     f"{market_data.end_date.strftime('%Y-%m-%d')}"
                 )
-        
+                actual_start_dates.append(market_data.start_date)
+
+        # 对齐到所有标的数据都齐备的最早日期
+        if actual_start_dates:
+            latest_start = max(actual_start_dates)
+            if latest_start > start_date:
+                logger.warning(
+                    f"请求的起始日期 {start_date.strftime('%Y-%m-%d')} 早于部分标的的数据起始日期，"
+                    f"自动调整为所有标的数据都齐备的最早日期: {latest_start.strftime('%Y-%m-%d')}"
+                )
+                data = {
+                    symbol: market_data.slice(latest_start, end_date)
+                    for symbol, market_data in data.items()
+                }
+
         return data
     
     async def run(
@@ -265,9 +317,67 @@ class Backtester:
         logger.info(f"总收益率: {result.total_return:.2%}")
         logger.info(f"夏普比率: {result.sharpe_ratio:.2f}")
         logger.info(f"最大回撤: {result.max_drawdown:.2%}")
-        
+
         return result
-    
+
+    async def run_with_data(
+        self,
+        strategy: Strategy,
+        data: Dict[str, MarketData],
+        start_date: datetime,
+        end_date: datetime,
+        initial_capital: float = 100000.0,
+    ) -> BacktestResult:
+        """
+        使用已获取的数据运行回测（避免重复获取数据）
+
+        Args:
+            strategy: 交易策略
+            data: 已获取的市场数据字典
+            start_date: 开始日期
+            end_date: 结束日期
+            initial_capital: 初始资金
+
+        Returns:
+            回测结果
+        """
+        valid_symbols = [s for s, d in data.items() if not d.is_empty]
+        if not valid_symbols:
+            raise ValueError("没有有效的市场数据")
+
+        # 对齐所有标的数据到共同起始日期，防止某些数据源
+        #（如国债收益率、外汇）的更早数据拉长模拟时间线
+        actual_start_dates = [data[s].start_date for s in valid_symbols]
+        latest_start = max(actual_start_dates)
+        if latest_start > start_date:
+            logger.info(
+                f"数据对齐: 实际起始日期调整为 {latest_start.strftime('%Y-%m-%d')}"
+            )
+            aligned_data = {
+                s: data[s].slice(latest_start, end_date)
+                for s in valid_symbols
+            }
+        else:
+            aligned_data = {s: data[s] for s in valid_symbols}
+
+        portfolio = Portfolio(initial_capital=initial_capital, name=strategy.name)
+        broker = VirtualBroker(config=self.broker_config)
+        engine = SimulationEngine(
+            portfolio=portfolio,
+            broker=broker,
+            strategies=[strategy],
+        )
+
+        engine.run(aligned_data)
+
+        return self._calculate_result(
+            strategy=strategy,
+            portfolio=portfolio,
+            broker=broker,
+            start_date=start_date,
+            end_date=end_date,
+        )
+
     def _calculate_result(
         self,
         strategy: Strategy,
@@ -291,7 +401,7 @@ class Backtester:
         """
         # 获取净值曲线
         equity_df = portfolio.to_dataframe()
-        
+
         if equity_df.empty:
             return BacktestResult(
                 strategy_name=strategy.name,
@@ -300,14 +410,19 @@ class Backtester:
                 initial_capital=portfolio.initial_capital,
                 final_value=portfolio.initial_capital,
             )
-        
+
+        # 使用净值曲线的实际时间范围（反映真实模拟期间，
+        # 而非用户请求的日期，后者可能早于数据实际起始日）
+        actual_start = equity_df.index[0].to_pydatetime()
+        actual_end = equity_df.index[-1].to_pydatetime()
+
         # 计算收益
         initial_capital = portfolio.initial_capital
         final_value = equity_df["total_value"].iloc[-1]
         total_return = (final_value - initial_capital) / initial_capital
-        
+
         # 计算年化收益
-        days = (end_date - start_date).days
+        days = (actual_end - actual_start).days
         years = days / 365.25
         annual_return = (1 + total_return) ** (1 / years) - 1 if years > 0 else 0
         
@@ -341,6 +456,20 @@ class Backtester:
         fills = broker.fill_history
         total_trades = len(fills)
 
+        buy_count = sum(1 for f in fills if f["side"] == "buy")
+        sell_count = sum(1 for f in fills if f["side"] == "sell")
+        total_invested = sum(
+            f["quantity"] * f["price"] for f in fills if f["side"] == "buy"
+        )
+
+        # 投资期限
+        first_trade_date = None
+        last_trade_date = None
+        if fills:
+            sorted_timestamps = sorted(f["timestamp"] for f in fills)
+            first_trade_date = sorted_timestamps[0]
+            last_trade_date = sorted_timestamps[-1]
+
         # 按 symbol 分组计算完整交易的盈亏
         trade_pnls = self._calculate_trade_pnls(fills)
 
@@ -367,8 +496,8 @@ class Backtester:
         
         return BacktestResult(
             strategy_name=strategy.name,
-            start_date=start_date,
-            end_date=end_date,
+            start_date=actual_start,
+            end_date=actual_end,
             initial_capital=initial_capital,
             final_value=final_value,
             total_return=total_return,
@@ -379,6 +508,11 @@ class Backtester:
             max_drawdown=max_drawdown,
             max_drawdown_duration=max_drawdown_duration,
             total_trades=total_trades,
+            buy_count=buy_count,
+            sell_count=sell_count,
+            total_invested=total_invested,
+            first_trade_date=first_trade_date,
+            last_trade_date=last_trade_date,
             winning_trades=winning_trades,
             losing_trades=losing_trades,
             win_rate=win_rate,
@@ -393,16 +527,16 @@ class Backtester:
     
     def _calculate_trade_pnls(self, fills: List[Dict[str, Any]]) -> List[float]:
         """
-        按 symbol 分组计算完整交易的盈亏
+        按 symbol 分组计算每笔平仓交易的盈亏
 
-        一次完整交易定义为：从开仓到平仓的过程。
-        支持多头（买入后卖出）和空头（卖出后买入）。
+        每次减仓（部分或完全平仓）都记录一笔交易盈亏，
+        手续费按比例分摊到每笔平仓交易。
 
         Args:
             fills: 成交记录列表
 
         Returns:
-            每笔完整交易的盈亏列表
+            每笔平仓交易的盈亏列表
         """
         from collections import defaultdict
 
@@ -420,13 +554,11 @@ class Backtester:
             # 跟踪当前持仓
             position_qty = 0.0
             position_cost = 0.0  # 总成本
-            total_commission = 0.0
 
             for fill in sorted_fills:
                 qty = fill["quantity"]
                 price = fill["price"]
                 commission = fill["commission"]
-                total_commission += commission
 
                 if fill["side"] == "buy":
                     if position_qty >= 0:
@@ -436,15 +568,17 @@ class Backtester:
                     else:
                         # 平空仓
                         close_qty = min(qty, abs(position_qty))
-                        # 空头盈亏 = (开仓价 - 平仓价) * 数量
                         avg_open_price = position_cost / abs(position_qty) if position_qty != 0 else 0
-                        pnl = (avg_open_price - price) * close_qty - total_commission
-                        if close_qty == abs(position_qty):
-                            # 完全平仓
-                            trade_pnls.append(pnl)
-                            total_commission = 0.0
+                        pnl = (avg_open_price - price) * close_qty - commission
+                        trade_pnls.append(pnl)
+
+                        old_abs_qty = abs(position_qty)
                         position_qty += close_qty
-                        position_cost = position_cost * (1 - close_qty / (close_qty + abs(position_qty - close_qty))) if position_qty - close_qty != 0 else 0
+                        remaining_abs_qty = abs(position_qty)
+                        if remaining_abs_qty > 0:
+                            position_cost = position_cost * (remaining_abs_qty / old_abs_qty)
+                        else:
+                            position_cost = 0.0
 
                         # 如果还有剩余买入量，开多仓
                         remaining = qty - close_qty
@@ -459,15 +593,16 @@ class Backtester:
                     else:
                         # 平多仓
                         close_qty = min(qty, position_qty)
-                        # 多头盈亏 = (平仓价 - 开仓价) * 数量
                         avg_open_price = position_cost / position_qty if position_qty != 0 else 0
-                        pnl = (price - avg_open_price) * close_qty - total_commission
-                        if close_qty == position_qty:
-                            # 完全平仓
-                            trade_pnls.append(pnl)
-                            total_commission = 0.0
+                        pnl = (price - avg_open_price) * close_qty - commission
+                        trade_pnls.append(pnl)
+
+                        old_qty = position_qty
                         position_qty -= close_qty
-                        position_cost = position_cost * (1 - close_qty / (close_qty + position_qty)) if position_qty > 0 else 0
+                        if position_qty > 0:
+                            position_cost = position_cost * (position_qty / old_qty)
+                        else:
+                            position_cost = 0.0
 
                         # 如果还有剩余卖出量，开空仓
                         remaining = qty - close_qty

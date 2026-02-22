@@ -61,9 +61,6 @@ class Portfolio:
         self.snapshots: List[PortfolioSnapshot] = []
         
         self.created_at = datetime.now()
-        
-        # 记录初始快照
-        self._record_snapshot({})
     
     def get_position(self, asset: Asset) -> Position:
         """
@@ -278,10 +275,12 @@ class Portfolio:
         total = self.total_value(prices)
         return (total - self.initial_capital) / self.initial_capital * 100
     
-    def _record_snapshot(self, prices: Dict[str, float]) -> None:
+    def _record_snapshot(
+        self, prices: Dict[str, float], timestamp: Optional[datetime] = None,
+    ) -> None:
         """记录组合快照"""
         snapshot = PortfolioSnapshot(
-            timestamp=datetime.now(),
+            timestamp=timestamp or datetime.now(),
             cash=self.cash,
             positions_value=self.positions_value(prices),
             total_value=self.total_value(prices),
@@ -289,10 +288,12 @@ class Portfolio:
             realized_pnl=self.realized_pnl(),
         )
         self.snapshots.append(snapshot)
-    
-    def record_daily(self, prices: Dict[str, float]) -> None:
+
+    def record_daily(
+        self, prices: Dict[str, float], timestamp: Optional[datetime] = None,
+    ) -> None:
         """记录每日快照（供回测使用）"""
-        self._record_snapshot(prices)
+        self._record_snapshot(prices, timestamp=timestamp)
     
     def get_active_orders(self) -> List[Order]:
         """获取活跃订单"""

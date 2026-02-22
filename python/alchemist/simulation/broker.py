@@ -194,34 +194,42 @@ class VirtualBroker:
         self,
         portfolio: Portfolio,
         market_data: OHLCV,
+        symbol: Optional[str] = None,
     ) -> List[Order]:
         """
         处理待处理订单
-        
+
         Args:
             portfolio: 投资组合
             market_data: 当前市场数据
-            
+            symbol: 当前市场数据对应的 symbol，仅处理匹配的订单
+
         Returns:
             已成交的订单列表
         """
         filled_orders = []
         remaining_orders = []
-        
+
         for order in self.pending_orders:
             if not order.is_active:
                 continue
-            
+
+            # 只处理与当前 market_data symbol 匹配的订单，
+            # 防止用错误 symbol 的价格成交
+            if symbol is not None and order.asset.symbol != symbol:
+                remaining_orders.append(order)
+                continue
+
             # 检查是否可以成交
             fill_price = self._get_fill_price(order, market_data)
-            
+
             if fill_price is not None:
                 # 应用滑点
                 fill_price = self.calculate_slippage(order, fill_price)
-                
+
                 # 计算手续费
                 commission = self.calculate_commission(order, fill_price)
-                
+
                 # 执行成交
                 success = portfolio.execute_order(
                     order,
@@ -229,10 +237,10 @@ class VirtualBroker:
                     commission,
                     slippage=0,  # 已经在 fill_price 中考虑
                 )
-                
+
                 if success:
                     filled_orders.append(order)
-                    
+
                     # 记录成交
                     self.fill_history.append({
                         "order_id": order.order_id,
@@ -243,7 +251,7 @@ class VirtualBroker:
                         "commission": commission,
                         "timestamp": market_data.timestamp,
                     })
-                    
+
                     # 触发回调
                     if self.on_fill:
                         self.on_fill(order)
@@ -253,7 +261,7 @@ class VirtualBroker:
             else:
                 # 无法成交，保留在队列中
                 remaining_orders.append(order)
-        
+
         self.pending_orders = remaining_orders
         return filled_orders
     
