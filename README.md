@@ -602,7 +602,9 @@ pytest -v -k "pnl"        # 只运行名称含 "pnl" 的测试
 |---------|---------|------|
 | `test_simulation.py` | 模拟交易系统：手续费、滑点、订单成交、盈亏计算、收益/风险指标、交易统计 | 无外部依赖 |
 | `test_sqlite_cache.py` | SQLite 缓存后端：CRUD、序列化、TTL、持久化、性能、并发 | 无外部依赖 |
-| `test_alphavantage_hk.py` | Alpha Vantage 港股数据连通性测试 | 需要 API Key |
+| `test_valuation.py` | 估值扫描系统：相对/绝对估值、情绪/宏观因子、综合打分、端到端流水线 | 无外部依赖 |
+| `test_data_providers.py` | 新增数据源：yfinance 情绪数据、FRED 宏观时间序列 | yfinance（已安装）；FRED 实时测试需 `FRED_API_KEY` |
+| `test_alphavantage.py` | Alpha Vantage 数据连通性测试 | 需要 API Key |
 
 #### 6.3 模拟交易系统测试 (test_simulation.py)
 
@@ -706,7 +708,104 @@ pytest python/tests/test_sqlite_cache.py::TestPerformance::test_cache_much_faste
 pytest python/tests/test_alphavantage.py -v -s
 ```
 
-#### 6.6 运行所有测试
+#### 6.6 估值扫描系统测试 (test_valuation.py)
+
+验证估值评估流水线的正确性，共 41 个测试用例，**无需任何 API Key**，全部本地运行。
+
+**测试类覆盖范围**：
+
+| 测试类 | 测试数 | 说明 |
+|-------|-------|------|
+| `TestModels` | 7 | 数据模型：评级映射边界（A-F）、投资时间窗口（1M/3M/6M/1Y）、向后兼容别名、序列化 |
+| `TestRelativeValuationFactors` | 8 | Z-Score 正负映射、百分位评分、PE 行业对比、缺失指标降级 |
+| `TestAbsoluteValuation` | 5 | DCF 三情景计算、乐观≥中性≥悲观排序、剩余收益模型、空报表容错 |
+| `TestSentimentFactors` | 5 | RSI 计算、数据不足降级、空头持仓/内部人交易数据集成 |
+| `TestMacroFactors` | 5 | Fed 模型、高/低 VIX 方向、利率环境、空数据容错 |
+| `TestValuationScorer` | 5 | 四维合成、自定义权重、A-F 评级一致性 |
+| `TestHorizonWeights` | 10 | Horizon 动态权重：1M情绪主导/1Y基本面主导/自定义覆盖/权重和=1 |
+| `TestIntegration` | 2 | 完整打分流水线端到端、行业汇总聚合计算 |
+
+**运行示例**：
+
+```bash
+# 运行全部估值测试
+pytest python/tests/test_valuation.py -v
+
+# 按测试类运行
+pytest python/tests/test_valuation.py::TestRelativeValuationFactors -v
+pytest python/tests/test_valuation.py::TestAbsoluteValuation -v
+pytest python/tests/test_valuation.py::TestMacroFactors -v
+pytest python/tests/test_valuation.py::TestValuationScorer -v
+pytest python/tests/test_valuation.py::TestIntegration -v
+
+# 按关键字过滤
+pytest python/tests/test_valuation.py -v -k "dcf"            # DCF 相关
+pytest python/tests/test_valuation.py -v -k "grade"          # 评级映射相关
+pytest python/tests/test_valuation.py -v -k "macro"          # 宏观因子相关
+pytest python/tests/test_valuation.py -v -k "integration"    # 集成测试
+```
+
+#### 6.7 数据提供者测试 (test_data_providers.py)
+
+验证新增数据源 yfinance 和 FRED 的数据获取能力，共 43 个测试用例（38 通过 + 5 跳过）。
+
+- **单元测试（38个）**：全部使用 Mock，无需真实网络连接
+- **实时数据测试（5个）**：FRED 实时接口测试，需设置环境变量 `FRED_API_KEY`（无 key 时自动跳过）
+
+**测试类覆盖范围**：
+
+| 测试类 | 测试数 | 依赖 | 说明 |
+|-------|-------|------|------|
+| `TestYFinanceProviderInit` | 5 | Mock | 初始化、is_available 属性、yfinance 缺失优雅降级 |
+| `TestYFinanceShortInterest` | 4 | Mock | 空头持仓数据结构、symbol 大写规范化、异常容错 |
+| `TestYFinanceInsiderTransactions` | 5 | Mock | 内部人交易结构、net_direction 方向性验证（+1/-1/0）、空 DataFrame 处理 |
+| `TestYFinanceBatchSentiment` | 2 | Mock | 批量获取结构、空列表边界 |
+| `TestYFinanceLiveData` | 3 | yfinance 网络 | AAPL/MSFT 真实数据结构验证（自动 skip 若不可用） |
+| `TestFREDProviderInit` | 5 | Mock | API key 配置、环境变量读取、FRED_SERIES 常量 |
+| `TestFREDGetSeriesMocked` | 4 | Mock | pd.Series 返回类型验证、DatetimeIndex、HTTP 错误、"." 占位符过滤 |
+| `TestFREDGetLatestValue` | 2 | Mock | 最新值提取、空序列返回 None |
+| `TestFREDMacroSnapshot` | 4 | Mock | 快照结构、yield_curve_spread 派生指标、部分缺失容错、无 key 空快照 |
+| `TestFREDGetMultipleSeries` | 2 | Mock | 批量返回结构、跳过失败序列 |
+| `TestFREDClose` | 2 | Mock | 会话关闭（有/无会话） |
+| `TestFREDLiveData` | 5 | FRED API | DGS10/FEDFUNDS 时间序列、最新值范围验证、完整宏观快照（需 `FRED_API_KEY`） |
+
+**运行示例**：
+
+```bash
+# 运行所有数据提供者测试（单元+实时，无 key 时实时测试自动跳过）
+pytest python/tests/test_data_providers.py -v
+
+# 仅运行 yfinance 相关测试
+pytest python/tests/test_data_providers.py -v -k "yfinance or YFinance"
+
+# 仅运行 FRED 相关测试
+pytest python/tests/test_data_providers.py -v -k "fred or FRED"
+
+# 仅运行单元测试（无网络依赖）
+pytest python/tests/test_data_providers.py -v -k "not Live"
+
+# 运行 FRED 实时测试（需先设置 API Key）
+FRED_API_KEY=your_key pytest python/tests/test_data_providers.py::TestFREDLiveData -v -s
+
+# 按测试类运行
+pytest python/tests/test_data_providers.py::TestYFinanceShortInterest -v
+pytest python/tests/test_data_providers.py::TestFREDMacroSnapshot -v
+pytest python/tests/test_data_providers.py::TestFREDGetSeriesMocked -v
+```
+
+**FRED 实时测试配置**：
+
+FRED API Key 可通过两种方式提供（二选一）：
+
+```bash
+# 方式1：环境变量（推荐用于 CI/CD）
+export FRED_API_KEY=your_fred_api_key
+pytest python/tests/test_data_providers.py::TestFREDLiveData -v
+
+# 方式2：config.yaml
+```
+
+#### 6.8 运行所有测试
 
 ```bash
 # 运行全部测试
@@ -717,9 +816,12 @@ pytest python/tests/ -v --tb=short
 
 # 运行全部测试（首次失败停止）
 pytest python/tests/ -v -x
+
+# 仅运行无需 API Key 的本地测试
+pytest python/tests/ -v -k "not alphavantage and not Live"
 ```
 
-> **说明**：如果 `config/config.yaml` 中未配置 `alphavantage.api_key`，Alpha Vantage 相关测试会自动跳过。
+> **说明**：如果 `config/config.yaml` 中未配置 `alphavantage.api_key`，Alpha Vantage 相关测试会自动跳过。`test_simulation.py`、`test_sqlite_cache.py`、`test_valuation.py` 以及 `test_data_providers.py` 的单元测试部分均无需 API Key，可直接运行。
 
 ### 端口映射
 
@@ -734,18 +836,40 @@ pytest python/tests/ -v -x
 
 Web 模块提供缓存数据可视化和 API 服务，基于 FastAPI + Uvicorn，支持 HTTPS。
 
-#### 7.1 启动 Web 服务
+#### 7.1 启动与重启 Web 服务
 
 ```bash
 # 进入项目目录
 cd ~/workspace/alchemist2026
 
 # 启动 Web 服务（前台运行，可看日志）
+# start_web.sh 会自动加载 docker/.env、检测并停止已运行的实例，可安全重复执行
 docker-compose -f docker/docker-compose.yml exec quant-dev /workspace/scripts/start_web.sh
 
 # 或后台运行
 docker-compose -f docker/docker-compose.yml exec -d quant-dev /workspace/scripts/start_web.sh
 ```
+
+**重启方式（三选一）**：
+
+```bash
+# 方式 1（推荐）：直接再次执行 start_web.sh
+# 脚本内置"检测旧进程 → 停止 → 重新启动"逻辑，可重复运行无副作用
+docker-compose -f docker/docker-compose.yml exec quant-dev /workspace/scripts/start_web.sh
+
+# 方式 2：使用语义更明确的 restart_web.sh（内部调用 start_web.sh）
+docker-compose -f docker/docker-compose.yml exec quant-dev /workspace/scripts/restart_web.sh
+
+# 方式 3：手动两步操作（适合需要确认进程已停止的场景）
+# 步骤1：停止现有进程
+docker exec quant-dev pkill -f "uvicorn web.app" || true
+# 步骤2：重新启动
+docker-compose -f docker/docker-compose.yml exec quant-dev /workspace/scripts/start_web.sh
+```
+
+> **注意**：Web 服务依赖 `docker/.env` 中的 `WEB_AUTH_PASSWORD` 配置访问密码。
+> `start_web.sh` 在启动时会自动 `source docker/.env`，同时 `web/config.py` 也内置了
+> python-dotenv 兜底加载，确保无论通过何种方式启动 uvicorn，密码配置均能生效。
 
 #### 7.2 访问地址
 
@@ -779,13 +903,7 @@ curl -sk "https://localhost:8443/api/market/ohlcv/AAPL?start_date=2026-01-01&end
 
 #### 7.4 重启 Web 服务
 
-```bash
-# 找到运行中的 uvicorn 进程并停止
-docker-compose -f docker/docker-compose.yml exec quant-dev pkill -f uvicorn
-
-# 重新启动
-docker-compose -f docker/docker-compose.yml exec quant-dev /workspace/scripts/start_web.sh
-```
+详见 **7.1 启动与重启 Web 服务** 中的三种重启方式。
 
 #### 7.5 SSL 证书
 
@@ -971,6 +1089,311 @@ python python/scripts/run_backtest.py gold-backtest --no-optimized
 - **交易频率惩罚**：买入过少（<10次/年）或过多（>100次/年）均扣分
 - **过拟合检测**：优化完成后自动对比训练集与验证集适应度比值，给出过拟合警告
 
+### 9. 美股估值扫描
+
+基于"筛选-剖析-验证-整合"四步框架，对全市场进行估值扫描，发掘在指定投资时间窗口（1M/3M/6M/1Y）内预期回归合理估值的美股。`--horizon` 指的是前瞻性时间窗口——预期标的在此期间内回归合理估值区间，而非向后回看的历史时段。
+
+#### 9.1 系统架构
+
+```
+数据采集层 (data/)
+├── AlphaVantageProvider     — OHLCV + OVERVIEW + 财务报表 (主数据源)
+├── YFinanceSentimentProvider — 空头持仓 + 内部人交易 (情绪补充)
+└── FREDProvider              — 宏观经济指标 (Fed 利率/CPI/VIX/GDP)
+
+估值引擎层 (strategy/valuation/)
+├── factors/
+│   ├── relative.py          — 相对估值 (PE/PB/PS/PEG/EV-EBITDA/P-FCF/股东回报)
+│   ├── absolute.py          — 绝对估值 (DCF 三情景 + 剩余收益模型)
+│   ├── sentiment.py         — 情绪面 (RSI/量价异常/空头/内部人/动量)
+│   └── macro.py             — 宏观面 (Fed 模型/20 法则/巴菲特指标/收益率曲线/VIX)
+├── scorer.py                — 四维加权综合打分器 (A-F 字母评级)
+├── scanner.py               — 扫描引擎 + 数据采集函数
+├── universe.py              — 股票池管理 (S&P500/NASDAQ100/全市场/自定义)
+└── models.py                — StockValuation / ScanResult 数据模型
+
+输出层
+├── CLI (run_backtest.py)    — 5 个子命令
+└── Web (routes/valuation.py) — REST API + 交互式页面
+```
+
+#### 9.2 估值框架说明
+
+| 步骤 | 维度 | 指标 |
+|-----|------|------|
+| Step 1 | 相对估值 | PE、PB、PS、PEG、EV/EBITDA、P/FCF、股东回报率、52周位置 |
+| Step 2 | 绝对估值 | DCF（乐观/中性/悲观三情景）、剩余收益模型（RIM） |
+| Step 3 | 情绪面 | RSI、成交量异常、波动率偏离、空头持仓比、内部人净方向、价格动量 |
+| Step 4 | 宏观面 | Fed 模型（盈利收益率 vs 10Y 国债）、Rule of 20（PE+CPI）、巴菲特指标（总市值/GDP）、收益率曲线、VIX |
+
+**因子权重随投资时间窗口 (`--horizon`) 动态调整**：
+
+| Horizon | 相对估值 | 绝对估值(DCF) | 情绪面 | 宏观面 | 设计理由 |
+|---------|---------|-------------|--------|--------|---------|
+| **1M** | 30% | 15% | **35%** | 20% | 短期回归靠情绪催化（RSI超卖/轧空/内部人买入） |
+| **3M** | 30% | 25% | 25% | 20% | 均衡（默认） |
+| **6M** | 25% | **30%** | 20% | 25% | 中长期基本面开始主导 |
+| **1Y** | 25% | **35%** | 15% | 25% | 长期回归靠 DCF 驱动，短期噪声已消化 |
+
+> 用户可通过 Web 界面或配置文件自定义权重，自定义权重优先于 horizon 默认值。
+
+综合分数范围 `[-1, +1]`，映射到字母评级：
+
+| 评级 | 分数范围 | 含义 |
+|-----|---------|------|
+| **A** | < -0.50 | 强烈低估，关注买入 |
+| **B** | -0.50 ~ -0.15 | 低估，值得研究 |
+| **C** | -0.15 ~ +0.15 | 合理估值 |
+| **D** | +0.15 ~ +0.50 | 高估，谨慎持有 |
+| **F** | > +0.50 | 强烈高估，考虑减持 |
+
+#### 9.3 配置
+
+在 `config/config.yaml` 中追加估值配置节（参考 `config/default.yaml.example`）：
+
+```yaml
+valuation:
+  weights:
+    relative: 0.30
+    absolute: 0.25
+    sentiment: 0.25
+    macro: 0.20
+  dcf:
+    projection_years: 5
+    terminal_growth_rate: 0.025
+    equity_risk_premium: 0.05
+  default_horizon: "3M"     # 投资时间窗口 (1M/3M/6M/1Y)
+  default_top_n: 50
+  fred_api_key: ""        # 可选，宏观数据更完整；也可设置环境变量 FRED_API_KEY
+```
+
+FRED API Key 免费注册：https://fred.stlouisfed.org/docs/api/api_key.html
+
+#### 9.4 典型工作流
+
+`valuation-fetch` 的 `--data-type` 支持三种**互相独立**的数据类型，分别对应不同的 Alpha Vantage API 和估值用途：
+
+| 数据类型 | API 端点 | 内容 | 估值用途 | API 消耗 |
+|----------|---------|------|----------|---------|
+| `overview` | `OVERVIEW` | PE、PB、PS、PEG、EV/EBITDA、MarketCap、行业等 | 相对估值因子 | 1 次/股票 |
+| `ohlcv` | `TIME_SERIES_DAILY` | 日线行情（开高低收量） | 情绪因子（RSI、量价、波动率） | 1 次/股票 |
+| `financials` | `CASH_FLOW` + `BALANCE_SHEET` + `INCOME_STATEMENT` | 年度/季度财务报表 | 绝对估值（DCF 模型） | 3 次/股票 |
+| `all` | 以上全部 | 一次采集所有数据 | 覆盖全部估值维度 | 5 次/股票 |
+
+> 三者无包含关系，可任意组合。`all` = `overview` + `ohlcv` + `financials`。默认仅采集 `overview`（性价比最高）。
+
+`--batch-size` 默认为 **0（自动）**，根据 API plan 和 data-type 智能计算：
+
+| Plan | 限制 | overview (1次) | financials (3次) | all (5次) |
+|------|------|---------------|-----------------|-----------|
+| **free** | 25次/天 | 自动 25 只/次 | 自动 8 只/次 | 自动 5 只/次 |
+| **premium** | 75次/分钟 | 全部（rate limiter 控流） | 全部 | 全部 |
+
+> 支持断点续传：自动跳过缓存有效期内的股票（overview 7天、financials 30天、ohlcv 3天），重复运行同一命令即可从上次中断处继续。
+
+**第一步：增量采集基本面数据**（受 API 限流约束，分天运行）
+
+```bash
+# Free plan（25次/天）：每天运行同一命令，自动续传
+python python/scripts/run_backtest.py valuation-fetch \
+    --universe sp500 --data-type overview
+
+# 采集财务报表（自动限制为 8 只/次，即 24 API 调用）
+python python/scripts/run_backtest.py valuation-fetch \
+    --universe sp500 --data-type financials
+
+# Premium plan（75次/分钟）：一次全量采集，rate limiter 自动控速
+python python/scripts/run_backtest.py valuation-fetch \
+    --universe sp500 --data-type overview --data-type financials
+
+# 显式覆盖批量大小
+python python/scripts/run_backtest.py valuation-fetch \
+    --universe sp500 --data-type overview --batch-size 10
+
+# 采集自定义股票组合
+python python/scripts/run_backtest.py valuation-fetch \
+    --symbols AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA \
+    --data-type overview --data-type financials
+```
+
+**第二步：查看数据覆盖率**
+
+```bash
+# 检查 S&P500 采集进度
+python python/scripts/run_backtest.py valuation-status --universe sp500
+
+# 示例输出：
+# 股票池大小: 100
+# ┌──────────────────┬─────┐
+# │ 总股票数          │ 100 │
+# │ 有 OVERVIEW      │  72 │
+# │ 有财务报表        │  45 │
+# │ OVERVIEW 覆盖率   │ 72.0% │
+# │ 财务数据覆盖率    │ 45.0% │
+# └──────────────────┴─────┘
+```
+
+**第三步：执行估值扫描**（纯本地计算，秒级完成）
+
+```bash
+# 扫描 S&P500，预期 3 个月内回归合理估值
+python python/scripts/run_backtest.py valuation-scan \
+    --horizon 3M --universe sp500 --top 30
+
+# 扫描 NASDAQ100，1年窗口（DCF 权重 35%，情绪权重 15%）
+python python/scripts/run_backtest.py valuation-scan \
+    --horizon 1Y --universe nasdaq100 --top 50
+
+# 扫描自定义组合并导出 CSV
+python python/scripts/run_backtest.py valuation-scan \
+    --horizon 6M --symbols AAPL,MSFT,GOOGL,AMZN,META,NVDA,TSLA,BRK.B \
+    --top 10 --export results.csv
+```
+
+**第四步：单只股票深度分析**
+
+```bash
+# 分析苹果公司（默认 3 个月窗口）
+python python/scripts/run_backtest.py valuation-stock AAPL
+
+# 分析微软（6 个月窗口，DCF 权重提升到 30%）
+python python/scripts/run_backtest.py valuation-stock MSFT --horizon 6M
+
+# 示例输出：
+# AAPL — Apple Inc.
+# ┌────────┬──────────────────────────┐
+# │ 行业   │ Technology / Consumer Electronics │
+# │ 当前价 │ $213.49                  │
+# │ 综合评级 │ B                       │
+# │ 综合分数 │ -0.2341                 │
+# │ 安全边际 │ +18.5%                  │
+# └────────┴──────────────────────────┘
+#
+# 四维因子得分
+# ┌──────────────────┬─────────┬──────┐
+# │ 相对估值          │ -0.1823 │  30% │
+# │ 绝对估值 (DCF)    │ -0.3456 │  25% │
+# │ 市场情绪          │ -0.1901 │  25% │
+# │ 宏观环境          │ -0.1234 │  20% │
+# └──────────────────┴─────────┴──────┘
+#
+# DCF 三情景分析
+# ┌────┬──────────┬──────────┐
+# │ 乐观 │ $265.30  │ +24.3%  │
+# │ 中性 │ $252.80  │ +18.5%  │
+# │ 悲观 │ $198.20  │ -7.2%   │
+# └────┴──────────┴──────────┘
+```
+
+**查看历史扫描记录**
+
+```bash
+python python/scripts/run_backtest.py valuation-history
+python python/scripts/run_backtest.py valuation-history --last 10
+```
+
+#### 9.5 CLI 命令参数速览
+
+| 命令 | 主要参数 | 说明 |
+|-----|---------|------|
+| `valuation-fetch` | `--universe` `--data-type` `--batch-size` | 增量采集基本面/财务数据 |
+| `valuation-scan` | `--horizon` `--universe` `--top` `--export` | 执行全量扫描，输出排行 |
+| `valuation-stock` | `SYMBOL` `--horizon` | 单只股票四维深度分析 |
+| `valuation-status` | `--universe` | 查看数据采集覆盖率 |
+| `valuation-history` | `--last` | 查看历史扫描记录 |
+
+**`--universe` 可选值**：
+
+| 值 | 说明 | 股票数 |
+|----|------|-------|
+| `sp500` | S&P 500 核心成分（默认） | ~100只预置 |
+| `nasdaq100` | NASDAQ 100 核心成分 | ~65只预置 |
+| `all` | 全市场（从 LISTING_STATUS 获取） | 数千只 |
+| `custom` | 结合 `--symbols` 使用 | 自定义 |
+
+**`--horizon`**（`valuation-scan` / `valuation-stock` 专用）：投资时间窗口（预期回归合理估值的期限），支持 `1M`（21个交易日）、`3M`（63个交易日，默认）、`6M`（126个交易日）、`1Y`（252个交易日）。不同窗口自动调整四维因子权重（见 9.2 表格）。向后兼容 `--period` 别名
+
+**`--data-type` 可选值**（`valuation-fetch` 专用）：`overview`（OVERVIEW API，1次）、`financials`（三张财务报表，3次）、`ohlcv`（历史价格，1次）、`all`（以上全部，5次）
+
+**`--batch-size`**（`valuation-fetch` 专用）：默认 `0`（自动根据 plan 和 data-type 计算），可手动指定覆盖
+
+#### 9.6 Web 界面
+
+启动 Web 服务后，访问 **https://localhost:8443/chart/valuation** 进入估值扫描页面：
+
+- **股票池 & 投资时间窗口选择**：sp500 / nasdaq100 / 自定义，1M / 3M / 6M / 1Y（不同窗口自动调整因子权重）
+- **权重调节滑块**：实时调整四维因子权重（相对/绝对/情绪/宏观），重新计算无需重新采集数据
+- **低估/高估排行表**：可排序，含 A-F 评级徽章、四维分项、安全边际
+- **行业热力图**：各行业平均估值分数 Plotly 柱状图
+- **股票详情模态框**：四维雷达图 + DCF 三情景柱状图 + 关键指标表
+- **宏观仪表盘**：10Y 国债收益率、VIX、CPI 等实时展示
+
+**Web API 端点**：
+
+| 端点 | 方法 | 说明 |
+|------|------|------|
+| `/api/valuation/scan` | POST | 触发估值扫描（异步） |
+| `/api/valuation/results` | GET | 获取最新扫描结果 |
+| `/api/valuation/stock/{symbol}` | GET | 单只股票详细评估 |
+| `/api/valuation/data-status` | GET | 数据覆盖率统计 |
+| `/api/valuation/history` | GET | 历史扫描记录 |
+
+#### 9.7 数据库新增表结构
+
+估值模块在原有 SQLite 数据库中新增两张表：
+
+**valuation_financials — 财务报表缓存**
+
+| 列 | 类型 | 说明 |
+|----|------|------|
+| `symbol` | TEXT | 股票代码 |
+| `fiscal_year` | TEXT | 财年（如 2024-09-30） |
+| `report_type` | TEXT | 报表类型：income / balance / cashflow |
+| `data_json` | TEXT | JSON 格式财务数据 |
+| `created_at` | TIMESTAMP | 写入时间 |
+
+**valuation_results — 扫描历史**
+
+| 列 | 类型 | 说明 |
+|----|------|------|
+| `id` | INTEGER (PK) | 自增主键 |
+| `scan_date` | TIMESTAMP | 扫描时间 |
+| `lookback_period` | TEXT | 投资时间窗口（1M/3M/6M/1Y），API 中已更名为 `horizon` |
+| `universe` | TEXT | 股票池名称 |
+| `result_json` | TEXT | 完整扫描结果 JSON |
+| `weights_json` | TEXT | 使用的因子权重 JSON |
+
+stock_info 表同步扩展了 14 个基本面字段：`pb_ratio`、`ps_ratio`、`peg_ratio`、`forward_pe`、`ev_to_ebitda`、`book_value`、`revenue_per_share`、`profit_margin`、`operating_margin`、`return_on_equity`、`shares_outstanding`、`price_to_fcf`、`dividend_per_share`、`payout_ratio`。
+
+#### 9.8 模块文件结构
+
+```
+python/alchemist/
+├── data/providers/
+│   ├── alphavantage.py         ← 扩展：get_stock_overview / get_income_statement
+│   │                              get_balance_sheet / get_cash_flow / get_listing_status
+│   ├── yfinance_provider.py    ← 新增：空头持仓 + 内部人交易
+│   └── fred_provider.py        ← 新增：FRED 宏观指标
+├── data/cache/
+│   └── sqlite_cache.py         ← 扩展：valuation_financials / valuation_results 表
+├── strategy/valuation/
+│   ├── __init__.py
+│   ├── models.py               ← StockValuation / ScanResult / score_to_grade
+│   ├── scorer.py               ← ValuationScorer（四维加权合成）
+│   ├── scanner.py              ← ValuationScanner + fetch_data_for_scan
+│   ├── universe.py             ← StockUniverse（股票池管理）
+│   └── factors/
+│       ├── __init__.py
+│       ├── relative.py         ← RelativeValuationFactors
+│       ├── absolute.py         ← DCFModel / ResidualIncomeModel / AbsoluteValuationFactors
+│       ├── sentiment.py        ← SentimentFactors
+│       └── macro.py            ← MacroFactors
+└── web/
+    ├── routes/valuation.py     ← REST API 路由
+    ├── schemas/valuation.py    ← Pydantic 请求/响应模型
+    └── templates/charts/valuation.html  ← 交互式前端页面
+```
+
 ## GPU 加速说明
 
 系统利用双 GPU 进行以下加速：
@@ -985,3 +1408,4 @@ python python/scripts/run_backtest.py gold-backtest --no-optimized
 2. **智能分析模块** - 机器学习驱动的市场分析
 3. **交易执行模块** - 对接真实券商API
 4. ~~**Web界面模块**~~ - ✅ 已完成（数据可视化、K线图、多资产对比）
+5. ~~**估值扫描模块**~~ - ✅ 已完成（四步估值框架、DCF三情景、A-F字母评级、CLI + Web双输出）

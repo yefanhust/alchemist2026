@@ -13,6 +13,11 @@ alphavantage:
   calls_per_minute: 5
   calls_per_day: 500
 
+# FRED API Key（宏观数据，用于估值扫描）
+# 免费注册: https://fred.stlouisfed.org/docs/api/api_key.html
+# 也可通过环境变量 FRED_API_KEY 设置
+fred_api_key: ""
+
 # 数据库配置
 database:
   # SQLite（默认）
@@ -64,3 +69,28 @@ web:
     certfile: "/workspace/python/alchemist/web/ssl/cert.pem"
   # 域名配置
   domain: "your-domain.example.com"
+
+# 估值扫描配置
+valuation:
+  # 默认因子权重（四维合计 = 1.0）
+  weights:
+    relative: 0.30        # 相对估值 (PE/PB/PS/PEG/EV-EBITDA/P-FCF)
+    absolute: 0.25        # 绝对估值 (DCF + 剩余收益模型)
+    sentiment: 0.25       # 情绪面 (RSI/空头/内部人/量价)
+    macro: 0.20           # 宏观环境 (Fed模型/20法则/巴菲特指标)
+  # DCF 模型参数
+  dcf:
+    projection_years: 5           # 预测年数
+    terminal_growth_rate: 0.025   # 永续增长率 2.5%
+    equity_risk_premium: 0.05     # 股权风险溢价 5%
+    scenarios:
+      optimistic_multiplier: 1.2  # 乐观情景增长率倍数
+      pessimistic_multiplier: 0.5 # 悲观情景增长率倍数
+  # 扫描默认参数
+  default_lookback: "3M"          # 默认时间窗口
+  default_top_n: 50               # 默认返回前N只
+  min_market_cap: 100000000       # 最低市值 (1亿美元)
+  min_avg_volume: 100000          # 最低日均成交量
+  # 缓存 TTL
+  overview_cache_ttl_days: 7      # OVERVIEW 数据缓存天数
+  financials_cache_ttl_days: 30   # 财务报表数据缓存天数
