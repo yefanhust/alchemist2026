@@ -265,6 +265,13 @@ class AlphaVantageProvider(DataProvider):
                             logger.error(f"API 限流，已达最大重试次数: {rate_limit_msg}")
                             raise Exception(f"API 限流: {rate_limit_msg}")
 
+                    # 空响应视为异常（部分股票/接口会返回 {}）
+                    if not data:
+                        raise Exception(
+                            f"API 返回空响应 (function={params.get('function')}, "
+                            f"symbol={params.get('symbol', 'N/A')})"
+                        )
+
                     return data
 
             except aiohttp.ClientError as e:
@@ -336,8 +343,10 @@ class AlphaVantageProvider(DataProvider):
         try:
             data = await self._make_request(params)
         except Exception as e:
-            # 部分 _ADJUSTED 接口对非美股可能不可用，回退到非 adjusted 版本
-            if "Invalid API call" in str(e) and func.endswith("_ADJUSTED"):
+            # _ADJUSTED 接口失败（Invalid API call 或空响应），回退到非 adjusted 版本
+            if func.endswith("_ADJUSTED") and (
+                "Invalid API call" in str(e) or "API 返回空响应" in str(e)
+            ):
                 fallback_func = func.replace("_ADJUSTED", "")
                 logger.warning(f"{func} 不支持 {symbol}，回退到 {fallback_func}")
                 params["function"] = fallback_func
@@ -385,7 +394,7 @@ class AlphaVantageProvider(DataProvider):
                 break
 
         if not time_series_key:
-            logger.warning(f"响应中未找到时间序列数据: {list(data.keys())}")
+            logger.warning(f"{symbol}: 响应中未找到时间序列数据, keys={list(data.keys())}")
             return MarketData(symbol=symbol)
 
         time_series = data[time_series_key]
@@ -666,6 +675,211 @@ class AlphaVantageProvider(DataProvider):
             }
             for m in matches
         ]
+
+    async def get_stock_overview(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        获取股票 OVERVIEW 基本面数据
+
+        Args:
+            symbol: 股票代码
+
+        Returns:
+            基本面数据字典（含 PE, PB, PS, PEG, EV/EBITDA 等估值指标）
+        """
+        symbol = symbol.upper()
+        params = {"function": "OVERVIEW", "symbol": symbol}
+
+        try:
+            data = await self._make_request(params)
+        except Exception as e:
+            logger.warning(f"获取 {symbol} OVERVIEW 失败: {e}")
+            return None
+
+        if not data or "Symbol" not in data:
+            return None
+
+        def safe_float(val):
+            try:
+                if val and val != "None" and val != "-" and val != "":
+                    return float(val)
+            except (ValueError, TypeError):
+                pass
+            return None
+
+        result = {
+            "symbol": data.get("Symbol", symbol),
+            "name": data.get("Name"),
+            "exchange": data.get("Exchange"),
+            "asset_type": data.get("AssetType"),
+            "sector": data.get("Sector"),
+            "industry": data.get("Industry"),
+            "country": data.get("Country"),
+            "currency": data.get("Currency"),
+            "description": data.get("Description"),
+            "market_cap": safe_float(data.get("MarketCapitalization")),
+            "pe_ratio": safe_float(data.get("PERatio")),
+            "dividend_yield": safe_float(data.get("DividendYield")),
+            "eps": safe_float(data.get("EPS")),
+            "beta": safe_float(data.get("Beta")),
+            "high_52week": safe_float(data.get("52WeekHigh")),
+            "low_52week": safe_float(data.get("52WeekLow")),
+            # 新增估值字段
+            "pb_ratio": safe_float(data.get("PriceToBookRatio")),
+            "ps_ratio": safe_float(data.get("PriceToSalesRatioTTM")),
+            "peg_ratio": safe_float(data.get("PEGRatio")),
+            "forward_pe": safe_float(data.get("ForwardPE")),
+            "ev_to_ebitda": safe_float(data.get("EVToEBITDA")),
+            "book_value": safe_float(data.get("BookValue")),
+            "revenue_per_share": safe_float(data.get("RevenuePerShareTTM")),
+            "profit_margin": safe_float(data.get("ProfitMargin")),
+            "operating_margin": safe_float(data.get("OperatingMarginTTM")),
+            "return_on_equity": safe_float(data.get("ReturnOnEquityTTM")),
+            "shares_outstanding": safe_float(data.get("SharesOutstanding")),
+            "dividend_per_share": safe_float(data.get("DividendPerShare")),
+            "payout_ratio": safe_float(data.get("PayoutRatio")),
+        }
+
+        # 保存到缓存
+        if self.cache and hasattr(self.cache, "save_stock_info"):
+            await self.cache.save_stock_info(symbol, result)
+
+        return result
+
+    async def get_income_statement(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        获取利润表数据（年报 + 季报）
+
+        Args:
+            symbol: 股票代码
+
+        Returns:
+            包含 annualReports 和 quarterlyReports 的字典
+        """
+        symbol = symbol.upper()
+        params = {"function": "INCOME_STATEMENT", "symbol": symbol}
+
+        try:
+            data = await self._make_request(params)
+        except Exception as e:
+            logger.warning(f"获取 {symbol} INCOME_STATEMENT 失败: {e}")
+            return None
+
+        if not data or "annualReports" not in data:
+            return None
+
+        # 保存到缓存
+        if self.cache and hasattr(self.cache, "save_valuation_financials"):
+            for report in data.get("annualReports", []):
+                fiscal_year = report.get("fiscalDateEnding", "")[:4]
+                if fiscal_year:
+                    await self.cache.save_valuation_financials(
+                        symbol, fiscal_year, "income", report
+                    )
+
+        return data
+
+    async def get_balance_sheet(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        获取资产负债表数据
+
+        Args:
+            symbol: 股票代码
+
+        Returns:
+            包含 annualReports 和 quarterlyReports 的字典
+        """
+        symbol = symbol.upper()
+        params = {"function": "BALANCE_SHEET", "symbol": symbol}
+
+        try:
+            data = await self._make_request(params)
+        except Exception as e:
+            logger.warning(f"获取 {symbol} BALANCE_SHEET 失败: {e}")
+            return None
+
+        if not data or "annualReports" not in data:
+            return None
+
+        if self.cache and hasattr(self.cache, "save_valuation_financials"):
+            for report in data.get("annualReports", []):
+                fiscal_year = report.get("fiscalDateEnding", "")[:4]
+                if fiscal_year:
+                    await self.cache.save_valuation_financials(
+                        symbol, fiscal_year, "balance", report
+                    )
+
+        return data
+
+    async def get_cash_flow(self, symbol: str) -> Optional[Dict[str, Any]]:
+        """
+        获取现金流量表数据
+
+        Args:
+            symbol: 股票代码
+
+        Returns:
+            包含 annualReports 和 quarterlyReports 的字典
+        """
+        symbol = symbol.upper()
+        params = {"function": "CASH_FLOW", "symbol": symbol}
+
+        try:
+            data = await self._make_request(params)
+        except Exception as e:
+            logger.warning(f"获取 {symbol} CASH_FLOW 失败: {e}")
+            return None
+
+        if not data or "annualReports" not in data:
+            return None
+
+        if self.cache and hasattr(self.cache, "save_valuation_financials"):
+            for report in data.get("annualReports", []):
+                fiscal_year = report.get("fiscalDateEnding", "")[:4]
+                if fiscal_year:
+                    await self.cache.save_valuation_financials(
+                        symbol, fiscal_year, "cashflow", report
+                    )
+
+        return data
+
+    async def get_listing_status(self, state: str = "active") -> List[Dict[str, str]]:
+        """
+        获取全市场股票列表
+
+        Args:
+            state: "active" 或 "delisted"
+
+        Returns:
+            股票列表 [{symbol, name, exchange, assetType, ipoDate, ...}]
+        """
+        import csv
+        import io
+
+        params = {"function": "LISTING_STATUS", "state": state}
+
+        await self.rate_limiter.acquire()
+        params["apikey"] = self.api_key
+
+        session = await self._get_session()
+        async with session.get(self.BASE_URL, params=params) as response:
+            if response.status != 200:
+                raise Exception(f"LISTING_STATUS 请求失败: {response.status}")
+            text = await response.text()
+
+        reader = csv.DictReader(io.StringIO(text))
+        results = []
+        for row in reader:
+            results.append({
+                "symbol": row.get("symbol", ""),
+                "name": row.get("name", ""),
+                "exchange": row.get("exchange", ""),
+                "asset_type": row.get("assetType", ""),
+                "ipo_date": row.get("ipoDate", ""),
+                "status": row.get("status", ""),
+            })
+
+        logger.info(f"LISTING_STATUS 返回 {len(results)} 条记录 (state={state})")
+        return results
 
     def __repr__(self):
         return f"AlphaVantageProvider(api_key=***)"

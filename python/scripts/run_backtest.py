@@ -1001,6 +1001,546 @@ def _display_optimization_result(opt_result, best_bench_day: int):
 
 
 @app.command()
+def valuation_fetch(
+    universe: str = typer.Option("sp500", "--universe", "-u", help="股票池: sp500/nasdaq100/all/custom"),
+    symbols: Optional[List[str]] = typer.Option(None, "--symbols", "-sym", help="自定义股票列表 (逗号分隔)"),
+    data_type: List[str] = typer.Option(["overview"], "--data-type", "-d", help="数据类型: overview/ohlcv/financials/all"),
+    batch_size: int = typer.Option(0, "--batch-size", "-b", help="每批符号数 (0=自动根据 plan 计算)"),
+    config_file: Optional[str] = typer.Option(None, "--config", help="配置文件路径"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="详细输出"),
+):
+    """
+    增量采集估值扫描所需数据
+
+    数据采集与打分计算分离。采集阶段可分天增量运行（Free plan 25次/天），
+    打分阶段纯本地秒级完成。自动跳过缓存有效期内的股票，支持断点续传。
+
+    --batch-size 默认为 0（自动）：
+      Free plan  → 25 / (每只股票 API 调用数)，如 financials=3 则自动 8 只/次
+      Premium    → 不限制，rate limiter 控制节奏
+
+    示例:
+        valuation-fetch --universe sp500
+        valuation-fetch --symbols AAPL,MSFT,GOOGL --data-type overview --data-type financials
+        valuation-fetch --universe all --data-type ohlcv
+        valuation-fetch --universe sp500 --batch-size 10  # 显式覆盖
+    """
+    setup_logger(level="DEBUG" if verbose else "INFO")
+    config = load_config(config_file)
+
+    if not config.alphavantage.api_key:
+        console.print("[red]错误: 未设置 Alpha Vantage API Key[/red]")
+        raise typer.Exit(1)
+
+    # 解析自定义股票
+    custom_symbols = None
+    if symbols:
+        custom_symbols = parse_symbols(symbols)
+
+    plan = config.alphavantage.plan
+
+    # 展开 "all" 并计算每只股票的 API 调用数
+    from strategy.valuation.scanner import _calls_per_symbol, _expand_data_types
+    expanded_types = _expand_data_types(data_type)
+    cps = _calls_per_symbol(data_type)
+
+    console.print(f"\n[bold]估值数据采集[/bold]")
+    console.print(f"股票池: [cyan]{universe}[/cyan]")
+    if custom_symbols:
+        console.print(f"自定义股票: [cyan]{', '.join(custom_symbols)}[/cyan]")
+    console.print(f"数据类型: [cyan]{', '.join(expanded_types)}[/cyan] ({cps} API 调用/股票)")
+    console.print(f"API Plan: [cyan]{plan}[/cyan]")
+    if batch_size > 0:
+        console.print(f"每批数量: [cyan]{batch_size}[/cyan] (手动指定)")
+    elif plan == "free":
+        auto_batch = 25 // cps if cps > 0 else 25
+        console.print(f"每批数量: [cyan]{auto_batch}[/cyan] (自动: 25 日调用 ÷ {cps} 调用/股票)")
+    else:
+        console.print(f"每批数量: [cyan]全部[/cyan] (premium plan, rate limiter 控制节奏)")
+    console.print()
+
+    async def run():
+        from strategy.valuation.scanner import fetch_data_for_scan
+        from strategy.valuation.universe import StockUniverse
+
+        cache = SQLiteCache(db_path=get_data_cache_path())
+        provider = AlphaVantageProvider(
+            api_key=config.alphavantage.api_key,
+            cache_backend=cache,
+            plan=plan,
+        )
+
+        try:
+            # 获取股票列表（传 provider 以支持 --universe all 拉取 LISTING_STATUS）
+            stock_universe = StockUniverse(cache, provider=provider)
+            target_symbols = await stock_universe.get_universe(universe, custom_symbols)
+            console.print(f"目标股票数: [cyan]{len(target_symbols)}[/cyan]")
+
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                console=console,
+            ) as progress:
+                progress.add_task("采集数据...", total=None)
+                stats = await fetch_data_for_scan(
+                    symbols=target_symbols,
+                    provider=provider,
+                    cache=cache,
+                    data_types=data_type,
+                    batch_size=batch_size,
+                    plan=plan,
+                )
+
+            # 显示结果
+            stats_table = Table(title="采集统计")
+            stats_table.add_column("项目", style="cyan")
+            stats_table.add_column("数量", style="yellow", justify="right")
+            for key, value in stats.items():
+                stats_table.add_row(key, str(value))
+            console.print(stats_table)
+
+        finally:
+            await provider.close()
+
+    asyncio.run(run())
+
+
+@app.command()
+def valuation_scan(
+    horizon: str = typer.Option("3M", "--horizon", "--period", "-p", help="投资时间窗口: 1M/3M/6M/1Y (预期回归合理估值的时间)"),
+    universe: str = typer.Option("sp500", "--universe", "-u", help="股票池: sp500/nasdaq100/all/custom"),
+    symbols: Optional[List[str]] = typer.Option(None, "--symbols", "-sym", help="自定义股票列表 (逗号分隔)"),
+    top_n: int = typer.Option(30, "--top", "-n", help="返回前N只"),
+    export_csv: Optional[str] = typer.Option(None, "--export", "-e", help="导出 CSV 文件路径"),
+    config_file: Optional[str] = typer.Option(None, "--config", help="配置文件路径"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="详细输出"),
+):
+    """
+    执行估值扫描（纯本地计算，秒级完成）
+
+    基于缓存的基本面、价格和宏观数据，计算四维综合估值分数，
+    返回最被低估和高估的股票排名。
+
+    示例:
+        valuation-scan --horizon 3M --universe sp500 --top 30
+        valuation-scan --horizon 1Y --symbols AAPL,MSFT,GOOGL,AMZN --top 10
+        valuation-scan --horizon 6M --universe nasdaq100 --export results.csv
+    """
+    setup_logger(level="DEBUG" if verbose else "INFO")
+    config = load_config(config_file)
+
+    custom_symbols = None
+    if symbols:
+        custom_symbols = parse_symbols(symbols)
+
+    from strategy.valuation.models import HORIZON_WEIGHTS
+    weights = HORIZON_WEIGHTS.get(horizon.upper(), HORIZON_WEIGHTS["3M"])
+
+    console.print(f"\n[bold]估值扫描[/bold]")
+    console.print(f"投资窗口: [cyan]{horizon}[/cyan] (预期回归合理估值的时间)")
+    console.print(f"因子权重: 相对={weights['relative']:.0%} 绝对={weights['absolute']:.0%} "
+                  f"情绪={weights['sentiment']:.0%} 宏观={weights['macro']:.0%}")
+    console.print(f"股票池: [cyan]{universe}[/cyan]")
+    if custom_symbols:
+        console.print(f"自定义股票: [cyan]{', '.join(custom_symbols)}[/cyan]")
+    console.print(f"返回前: [cyan]{top_n}[/cyan] 只\n")
+
+    async def run():
+        from data.providers.fred_provider import FREDProvider
+        from data.providers.yfinance_provider import YFinanceSentimentProvider
+        from strategy.valuation.scanner import ValuationScanner
+
+        cache = SQLiteCache(db_path=get_data_cache_path())
+
+        # FRED 提供者（API key 从环境变量 FRED_API_KEY 读取）
+        fred = FREDProvider(cache_backend=cache)
+
+        # yfinance 提供者
+        yf = YFinanceSentimentProvider()
+
+        scanner = ValuationScanner(
+            cache=cache,
+            fred_provider=fred,
+            yfinance_provider=yf,
+        )
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+        ) as progress:
+            progress.add_task("扫描中...", total=None)
+            result = await scanner.scan(
+                horizon=horizon,
+                universe_name=universe,
+                custom_symbols=custom_symbols,
+                top_n=top_n,
+            )
+
+        # 显示结果
+        console.print(f"\n扫描完成: [cyan]{result.total_scanned}[/cyan] 只股票, "
+                       f"耗时 [cyan]{result.scan_duration_seconds:.1f}s[/cyan]\n")
+
+        # 低估排行
+        if result.most_undervalued:
+            under_table = Table(title=f"最被低估 (Grade A/B) — 前 {len(result.most_undervalued)} 只")
+            under_table.add_column("#", style="dim", justify="right")
+            under_table.add_column("代码", style="cyan", no_wrap=True)
+            under_table.add_column("名称", max_width=20)
+            under_table.add_column("行业", max_width=15)
+            under_table.add_column("价格", justify="right")
+            under_table.add_column("评级", justify="center")
+            under_table.add_column("综合", justify="right")
+            under_table.add_column("相对", justify="right")
+            under_table.add_column("绝对", justify="right")
+            under_table.add_column("情绪", justify="right")
+            under_table.add_column("安全边际", justify="right")
+
+            for i, v in enumerate(result.most_undervalued, 1):
+                grade_color = "green" if v.grade == "A" else "cyan"
+                margin = f"{v.safety_margin:.0%}" if v.safety_margin else "N/A"
+                under_table.add_row(
+                    str(i), v.symbol, v.name[:20], v.sector[:15],
+                    f"${v.current_price:.2f}",
+                    f"[{grade_color}]{v.grade}[/{grade_color}]",
+                    f"[green]{v.composite_score:+.3f}[/green]",
+                    f"{v.relative_score:+.3f}",
+                    f"{v.absolute_score:+.3f}",
+                    f"{v.sentiment_score:+.3f}",
+                    margin,
+                )
+            console.print(under_table)
+
+        # 高估排行
+        if result.most_overvalued:
+            over_table = Table(title=f"\n最被高估 (Grade D/F) — 前 {len(result.most_overvalued)} 只")
+            over_table.add_column("#", style="dim", justify="right")
+            over_table.add_column("代码", style="cyan", no_wrap=True)
+            over_table.add_column("名称", max_width=20)
+            over_table.add_column("行业", max_width=15)
+            over_table.add_column("价格", justify="right")
+            over_table.add_column("评级", justify="center")
+            over_table.add_column("综合", justify="right")
+            over_table.add_column("相对", justify="right")
+            over_table.add_column("绝对", justify="right")
+            over_table.add_column("情绪", justify="right")
+
+            for i, v in enumerate(result.most_overvalued, 1):
+                grade_color = "red" if v.grade == "F" else "yellow"
+                over_table.add_row(
+                    str(i), v.symbol, v.name[:20], v.sector[:15],
+                    f"${v.current_price:.2f}",
+                    f"[{grade_color}]{v.grade}[/{grade_color}]",
+                    f"[red]{v.composite_score:+.3f}[/red]",
+                    f"{v.relative_score:+.3f}",
+                    f"{v.absolute_score:+.3f}",
+                    f"{v.sentiment_score:+.3f}",
+                )
+            console.print(over_table)
+
+        # 行业汇总
+        if result.sector_summary:
+            sector_table = Table(title="\n行业汇总")
+            sector_table.add_column("行业", style="cyan")
+            sector_table.add_column("数量", justify="right")
+            sector_table.add_column("平均分", justify="right")
+            sector_table.add_column("中位数", justify="right")
+            sector_table.add_column("低估", justify="right", style="green")
+            sector_table.add_column("高估", justify="right", style="red")
+
+            for sector, stats in result.sector_summary.items():
+                avg_color = "green" if stats["avg_score"] < 0 else "red"
+                sector_table.add_row(
+                    sector[:20],
+                    str(stats["count"]),
+                    f"[{avg_color}]{stats['avg_score']:+.3f}[/{avg_color}]",
+                    f"{stats['median_score']:+.3f}",
+                    str(stats["undervalued_count"]),
+                    str(stats["overvalued_count"]),
+                )
+            console.print(sector_table)
+
+        # 宏观环境
+        if result.macro_context:
+            macro_table = Table(title="\n宏观环境")
+            macro_table.add_column("指标", style="cyan")
+            macro_table.add_column("值", style="yellow", justify="right")
+            for key, value in result.macro_context.items():
+                if isinstance(value, float):
+                    macro_table.add_row(key, f"{value:.2f}")
+                else:
+                    macro_table.add_row(key, str(value))
+            console.print(macro_table)
+
+        # 导出 CSV
+        if export_csv:
+            import csv
+            all_valuations = result.most_undervalued + result.most_overvalued
+            if all_valuations:
+                with open(export_csv, "w", newline="") as f:
+                    writer = csv.writer(f)
+                    writer.writerow([
+                        "symbol", "name", "sector", "industry", "price",
+                        "grade", "composite", "relative", "absolute",
+                        "sentiment", "macro", "safety_margin",
+                    ])
+                    for v in all_valuations:
+                        writer.writerow([
+                            v.symbol, v.name, v.sector, v.industry,
+                            f"{v.current_price:.2f}", v.grade,
+                            f"{v.composite_score:.4f}",
+                            f"{v.relative_score:.4f}",
+                            f"{v.absolute_score:.4f}",
+                            f"{v.sentiment_score:.4f}",
+                            f"{v.macro_score:.4f}",
+                            f"{v.safety_margin:.4f}" if v.safety_margin else "",
+                        ])
+                console.print(f"\n[green]已导出到 {export_csv}[/green]")
+
+    asyncio.run(run())
+
+
+@app.command()
+def valuation_stock(
+    symbol: str = typer.Argument(..., help="股票代码"),
+    horizon: str = typer.Option("3M", "--horizon", "--period", "-p", help="投资时间窗口: 1M/3M/6M/1Y (预期回归合理估值的时间)"),
+    config_file: Optional[str] = typer.Option(None, "--config", help="配置文件路径"),
+    verbose: bool = typer.Option(False, "--verbose", "-v", help="详细输出"),
+):
+    """
+    单只股票详细估值分析
+
+    包含四维因子得分、DCF 三情景分析、关键指标。
+
+    示例:
+        valuation-stock AAPL --horizon 6M
+        valuation-stock MSFT
+    """
+    setup_logger(level="DEBUG" if verbose else "INFO")
+    config = load_config(config_file)
+
+    console.print(f"\n[bold]股票估值分析: {symbol.upper()}[/bold]")
+    console.print(f"投资窗口: [cyan]{horizon}[/cyan] (预期回归合理估值的时间)\n")
+
+    async def run():
+        from data.providers.fred_provider import FREDProvider
+        from data.providers.yfinance_provider import YFinanceSentimentProvider
+        from strategy.valuation.scanner import ValuationScanner
+
+        cache = SQLiteCache(db_path=get_data_cache_path())
+        fred = FREDProvider(cache_backend=cache)
+        yf = YFinanceSentimentProvider()
+
+        scanner = ValuationScanner(
+            cache=cache,
+            fred_provider=fred,
+            yfinance_provider=yf,
+        )
+
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            console=console,
+        ) as progress:
+            progress.add_task(f"评估 {symbol.upper()}...", total=None)
+            val = await scanner.evaluate_stock(symbol, horizon)
+
+        if val is None:
+            console.print(f"[red]无法评估 {symbol.upper()}，可能缺少基本面数据。[/red]")
+            console.print("请先运行 valuation-fetch 采集数据。")
+            raise typer.Exit(1)
+
+        # 基本信息
+        info_table = Table(title=f"{val.symbol} — {val.name}", show_header=False)
+        info_table.add_column("项目", style="cyan")
+        info_table.add_column("值", style="yellow")
+        info_table.add_row("行业", f"{val.sector} / {val.industry}")
+        info_table.add_row("当前价格", f"${val.current_price:.2f}")
+
+        grade_colors = {"A": "bold green", "B": "green", "C": "white", "D": "yellow", "F": "bold red"}
+        gc = grade_colors.get(val.grade, "white")
+        info_table.add_row("综合评级", f"[{gc}]{val.grade}[/{gc}]")
+        info_table.add_row("综合分数", f"{val.composite_score:+.4f}")
+
+        if val.safety_margin:
+            sm_color = "green" if val.safety_margin > 0 else "red"
+            info_table.add_row("安全边际", f"[{sm_color}]{val.safety_margin:.1%}[/{sm_color}]")
+        console.print(info_table)
+
+        # 四维因子得分
+        from strategy.valuation.models import HORIZON_WEIGHTS
+        weights = HORIZON_WEIGHTS.get(horizon.upper(), HORIZON_WEIGHTS["3M"])
+
+        score_table = Table(title="\n四维因子得分")
+        score_table.add_column("维度", style="cyan")
+        score_table.add_column("得分", justify="right")
+        score_table.add_column("权重", justify="right", style="dim")
+
+        for dim_name, score, w_key in [
+            ("相对估值", val.relative_score, "relative"),
+            ("绝对估值 (DCF)", val.absolute_score, "absolute"),
+            ("市场情绪", val.sentiment_score, "sentiment"),
+            ("宏观环境", val.macro_score, "macro"),
+        ]:
+            sc = "green" if score < 0 else ("red" if score > 0 else "white")
+            score_table.add_row(dim_name, f"[{sc}]{score:+.4f}[/{sc}]", f"{weights[w_key]:.0%}")
+        console.print(score_table)
+
+        # DCF 情景分析
+        if val.dcf_intrinsic_values:
+            dcf_table = Table(title="\nDCF 三情景分析")
+            dcf_table.add_column("情景", style="cyan")
+            dcf_table.add_column("内在价值", justify="right")
+            dcf_table.add_column("vs 当前价", justify="right")
+
+            for scenario in ["optimistic", "neutral", "pessimistic"]:
+                iv = val.dcf_intrinsic_values.get(scenario)
+                if iv and iv > 0:
+                    diff_pct = (iv - val.current_price) / val.current_price
+                    diff_color = "green" if diff_pct > 0 else "red"
+                    scenario_cn = {"optimistic": "乐观", "neutral": "中性", "pessimistic": "悲观"}
+                    dcf_table.add_row(
+                        scenario_cn.get(scenario, scenario),
+                        f"${iv:.2f}",
+                        f"[{diff_color}]{diff_pct:+.1%}[/{diff_color}]",
+                    )
+            console.print(dcf_table)
+
+        # 关键指标
+        if val.key_metrics:
+            metrics_table = Table(title="\n关键指标")
+            metrics_table.add_column("指标", style="cyan")
+            metrics_table.add_column("值", style="yellow", justify="right")
+
+            for key, value in val.key_metrics.items():
+                if isinstance(value, float):
+                    if abs(value) < 1:
+                        metrics_table.add_row(key, f"{value:.4f}")
+                    else:
+                        metrics_table.add_row(key, f"{value:.2f}")
+                elif value is not None:
+                    metrics_table.add_row(key, str(value))
+            console.print(metrics_table)
+
+    asyncio.run(run())
+
+
+@app.command()
+def valuation_status(
+    universe: str = typer.Option("sp500", "--universe", "-u", help="股票池"),
+    config_file: Optional[str] = typer.Option(None, "--config", help="配置文件路径"),
+):
+    """
+    查看估值扫描数据覆盖率
+
+    显示指定股票池的 OVERVIEW、财务报表、OHLCV 数据采集状态。
+
+    示例:
+        valuation-status
+        valuation-status --universe nasdaq100
+    """
+    config = load_config(config_file)
+
+    console.print(f"\n[bold]数据覆盖率检查[/bold]")
+    console.print(f"股票池: [cyan]{universe}[/cyan]\n")
+
+    async def run():
+        from strategy.valuation.universe import StockUniverse
+
+        cache = SQLiteCache(db_path=get_data_cache_path())
+        stock_universe = StockUniverse(cache)
+
+        symbols = await stock_universe.get_universe(universe)
+        console.print(f"股票池大小: [cyan]{len(symbols)}[/cyan]")
+
+        coverage = await stock_universe.get_data_coverage(symbols)
+
+        status_table = Table(title="数据覆盖率")
+        status_table.add_column("项目", style="cyan")
+        status_table.add_column("值", style="yellow", justify="right")
+
+        status_table.add_row("总股票数", str(coverage.get("total", 0)))
+        status_table.add_row("有 OVERVIEW", str(coverage.get("with_overview", 0)))
+        status_table.add_row("有财务报表", str(coverage.get("with_financials", 0)))
+        status_table.add_row("OVERVIEW 覆盖率", f"{coverage.get('coverage_pct', 0):.1f}%")
+        status_table.add_row("财务数据覆盖率", f"{coverage.get('financials_pct', 0):.1f}%")
+
+        console.print(status_table)
+
+        # 缺失列表
+        missing = coverage.get("missing_overview", [])
+        if missing:
+            console.print(f"\n缺少 OVERVIEW 的股票 ({len(missing)} 只):")
+            # 每行显示 10 个
+            for i in range(0, len(missing), 10):
+                chunk = missing[i:i+10]
+                console.print(f"  [dim]{', '.join(chunk)}[/dim]")
+
+    asyncio.run(run())
+
+
+@app.command()
+def valuation_history(
+    last: int = typer.Option(5, "--last", "-n", help="显示最近N次扫描"),
+    config_file: Optional[str] = typer.Option(None, "--config", help="配置文件路径"),
+):
+    """
+    查看历史扫描记录
+
+    显示最近的估值扫描结果摘要，支持对比不同时期的排名变化。
+
+    示例:
+        valuation-history
+        valuation-history --last 10
+    """
+    config = load_config(config_file)
+
+    console.print(f"\n[bold]历史扫描记录[/bold]\n")
+
+    async def run():
+        cache = SQLiteCache(db_path=get_data_cache_path())
+
+        try:
+            results = await cache.get_valuation_results(last)
+        except Exception as e:
+            console.print(f"[red]获取历史记录失败: {e}[/red]")
+            raise typer.Exit(1)
+
+        if not results:
+            console.print("[dim]暂无扫描记录。请先运行 valuation-scan。[/dim]")
+            return
+
+        history_table = Table(title=f"最近 {len(results)} 次扫描")
+        history_table.add_column("#", style="dim", justify="right")
+        history_table.add_column("日期", style="cyan")
+        history_table.add_column("窗口", justify="center")
+        history_table.add_column("股票池", justify="center")
+        history_table.add_column("扫描数", justify="right")
+        history_table.add_column("低估", justify="right", style="green")
+        history_table.add_column("高估", justify="right", style="red")
+
+        for i, r in enumerate(results, 1):
+            result_json = r.get("result_json", {})
+            total = result_json.get("total_scanned", 0)
+            undervalued = len(result_json.get("most_undervalued", []))
+            overvalued = len(result_json.get("most_overvalued", []))
+
+            history_table.add_row(
+                str(i),
+                r.get("scan_date", "")[:19],
+                r.get("lookback_period", ""),
+                r.get("universe", ""),
+                str(total),
+                str(undervalued),
+                str(overvalued),
+            )
+
+        console.print(history_table)
+
+    asyncio.run(run())
+
+
+@app.command()
 def list_strategies():
     """列出可用策略"""
     table = Table(title="可用策略")

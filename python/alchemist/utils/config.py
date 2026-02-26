@@ -91,6 +91,7 @@ class Config:
     """
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     alphavantage: AlphaVantageConfig = field(default_factory=AlphaVantageConfig)
+    fred_api_key: str = ""
     redis: RedisConfig = field(default_factory=RedisConfig)
     broker: BrokerConfig = field(default_factory=BrokerConfig)
     gpu: GPUConfig = field(default_factory=GPUConfig)
@@ -170,6 +171,9 @@ class Config:
                             setattr(config.web.ssl, ssl_key, ssl_value)
                 elif hasattr(config.web, key):
                     setattr(config.web, key, value)
+
+        if "fred_api_key" in data:
+            config.fred_api_key = data["fred_api_key"]
 
         if "initial_capital" in data:
             config.initial_capital = data["initial_capital"]

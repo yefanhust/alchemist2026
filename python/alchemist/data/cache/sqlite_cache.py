@@ -119,6 +119,56 @@ class SQLiteCache(CacheBackend):
                     )
                 """)
 
+                # 估值扩展字段迁移（stock_info 表）
+                valuation_columns = [
+                    ("pb_ratio", "REAL"),
+                    ("ps_ratio", "REAL"),
+                    ("peg_ratio", "REAL"),
+                    ("forward_pe", "REAL"),
+                    ("ev_to_ebitda", "REAL"),
+                    ("book_value", "REAL"),
+                    ("revenue_per_share", "REAL"),
+                    ("profit_margin", "REAL"),
+                    ("operating_margin", "REAL"),
+                    ("return_on_equity", "REAL"),
+                    ("shares_outstanding", "REAL"),
+                    ("price_to_fcf", "REAL"),
+                    ("dividend_per_share", "REAL"),
+                    ("payout_ratio", "REAL"),
+                ]
+                for col_name, col_type in valuation_columns:
+                    try:
+                        await db.execute(
+                            f"ALTER TABLE stock_info ADD COLUMN {col_name} {col_type}"
+                        )
+                    except Exception:
+                        pass  # 列已存在
+
+                # 创建估值财务报表表（DCF 用）
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS valuation_financials (
+                        symbol TEXT NOT NULL,
+                        fiscal_year TEXT NOT NULL,
+                        report_type TEXT NOT NULL,
+                        data TEXT NOT NULL,
+                        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                        PRIMARY KEY (symbol, fiscal_year, report_type)
+                    )
+                """)
+
+                # 创建估值扫描结果表
+                await db.execute("""
+                    CREATE TABLE IF NOT EXISTS valuation_results (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        scan_date TIMESTAMP NOT NULL,
+                        lookback_period TEXT NOT NULL,
+                        universe TEXT,
+                        result_json TEXT NOT NULL,
+                        weights_json TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+
                 # 创建索引
                 await db.execute("""
                     CREATE INDEX IF NOT EXISTS idx_stock_info_sector
@@ -505,8 +555,13 @@ class SQLiteCache(CacheBackend):
                     INSERT OR REPLACE INTO stock_info
                     (symbol, name, exchange, asset_type, sector, industry,
                      country, currency, description, market_cap, pe_ratio,
-                     dividend_yield, eps, beta, high_52week, low_52week, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     dividend_yield, eps, beta, high_52week, low_52week,
+                     pb_ratio, ps_ratio, peg_ratio, forward_pe, ev_to_ebitda,
+                     book_value, revenue_per_share, profit_margin, operating_margin,
+                     return_on_equity, shares_outstanding, price_to_fcf,
+                     dividend_per_share, payout_ratio, updated_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         symbol.upper(),
@@ -525,6 +580,20 @@ class SQLiteCache(CacheBackend):
                         info.get("beta"),
                         info.get("high_52week"),
                         info.get("low_52week"),
+                        info.get("pb_ratio"),
+                        info.get("ps_ratio"),
+                        info.get("peg_ratio"),
+                        info.get("forward_pe"),
+                        info.get("ev_to_ebitda"),
+                        info.get("book_value"),
+                        info.get("revenue_per_share"),
+                        info.get("profit_margin"),
+                        info.get("operating_margin"),
+                        info.get("return_on_equity"),
+                        info.get("shares_outstanding"),
+                        info.get("price_to_fcf"),
+                        info.get("dividend_per_share"),
+                        info.get("payout_ratio"),
                         datetime.now().isoformat(),
                     )
                 )
@@ -709,6 +778,176 @@ class SQLiteCache(CacheBackend):
             logger.error(f"获取统计信息失败: {e}")
             return {}
 
+    async def get_cached_stocks_paginated(
+        self,
+        page: int = 1,
+        per_page: int = 50,
+        search: str = "",
+        sector: str = "",
+    ) -> Dict[str, Any]:
+        """
+        分页获取缓存的股票列表
+
+        Args:
+            page: 页码（从1开始）
+            per_page: 每页条数
+            search: 搜索关键词（匹配 symbol 或 name）
+            sector: 行业过滤
+
+        Returns:
+            {"total", "page", "per_page", "total_pages", "stocks": [...], "sectors": [...]}
+        """
+        await self._ensure_initialized()
+
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+
+                # 构建查询条件
+                conditions = []
+                params: list = []
+
+                if search:
+                    conditions.append(
+                        "(UPPER(symbol) LIKE ? OR UPPER(name) LIKE ?)"
+                    )
+                    term = f"%{search.upper()}%"
+                    params.extend([term, term])
+
+                if sector:
+                    conditions.append("LOWER(sector) = ?")
+                    params.append(sector.lower())
+
+                where = (" AND ".join(conditions)) if conditions else "1=1"
+
+                # 总数
+                cursor = await db.execute(
+                    f"SELECT COUNT(*) FROM stock_info WHERE {where}", params
+                )
+                total = (await cursor.fetchone())[0]
+                total_pages = max(1, (total + per_page - 1) // per_page)
+
+                # 分页数据
+                offset = (page - 1) * per_page
+                cursor = await db.execute(
+                    f"""
+                    SELECT symbol, name, sector, industry, market_cap,
+                           pe_ratio, updated_at
+                    FROM stock_info
+                    WHERE {where}
+                    ORDER BY market_cap DESC NULLS LAST, symbol
+                    LIMIT ? OFFSET ?
+                    """,
+                    params + [per_page, offset],
+                )
+                rows = await cursor.fetchall()
+                stocks = [dict(row) for row in rows]
+
+                # 检查每只股票是否有 OHLCV 和财报数据
+                for s in stocks:
+                    sym = s["symbol"]
+                    c = await db.execute(
+                        "SELECT COUNT(*) FROM market_data WHERE symbol = ?",
+                        (sym,),
+                    )
+                    s["ohlcv_count"] = (await c.fetchone())[0]
+
+                    c = await db.execute(
+                        "SELECT COUNT(DISTINCT report_type) FROM valuation_financials WHERE symbol = ?",
+                        (sym,),
+                    )
+                    s["financials_types"] = (await c.fetchone())[0]
+
+                # 所有行业列表
+                cursor = await db.execute(
+                    """
+                    SELECT DISTINCT sector FROM stock_info
+                    WHERE sector IS NOT NULL AND sector != ''
+                    ORDER BY sector
+                    """
+                )
+                sectors = [row[0] for row in await cursor.fetchall()]
+
+                return {
+                    "total": total,
+                    "page": page,
+                    "per_page": per_page,
+                    "total_pages": total_pages,
+                    "stocks": stocks,
+                    "sectors": sectors,
+                }
+
+        except Exception as e:
+            logger.error(f"分页获取股票列表失败: {e}")
+            return {
+                "total": 0, "page": 1, "per_page": per_page,
+                "total_pages": 0, "stocks": [], "sectors": [],
+            }
+
+    async def get_stock_detail(self, symbol: str) -> Dict[str, Any]:
+        """
+        获取单只股票的全部缓存数据（overview + OHLCV摘要 + 财报）
+
+        Args:
+            symbol: 股票代码
+
+        Returns:
+            {"overview": {...}, "ohlcv_summary": {...}, "financials": {...}}
+        """
+        await self._ensure_initialized()
+        sym = symbol.upper()
+
+        # Overview
+        overview = await self.get_stock_info(sym)
+
+        # OHLCV 摘要
+        ohlcv_summary = None
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                cursor = await db.execute(
+                    """
+                    SELECT COUNT(*) as cnt,
+                           MIN(timestamp) as start_date,
+                           MAX(timestamp) as end_date
+                    FROM market_data WHERE symbol = ?
+                    """,
+                    (sym,),
+                )
+                row = await cursor.fetchone()
+                if row and row[0] > 0:
+                    # 获取最新一条数据
+                    cursor2 = await db.execute(
+                        """
+                        SELECT close, volume FROM market_data
+                        WHERE symbol = ?
+                        ORDER BY timestamp DESC LIMIT 1
+                        """,
+                        (sym,),
+                    )
+                    latest = await cursor2.fetchone()
+                    ohlcv_summary = {
+                        "count": row[0],
+                        "start_date": row[1],
+                        "end_date": row[2],
+                        "latest_close": latest[0] if latest else None,
+                        "latest_volume": latest[1] if latest else None,
+                    }
+        except Exception as e:
+            logger.error(f"获取 OHLCV 摘要失败: {sym}, {e}")
+
+        # 财报数据
+        financials = {}
+        for rtype in ("income", "balance", "cashflow"):
+            reports = await self.get_valuation_financials(sym, rtype)
+            if reports:
+                financials[rtype] = reports
+
+        return {
+            "overview": overview,
+            "ohlcv_summary": ohlcv_summary,
+            "financials": financials,
+        }
+
     # ========== 序列化/反序列化 ==========
     
     def _serialize(self, value: Any) -> tuple:
@@ -737,12 +976,158 @@ class SQLiteCache(CacheBackend):
         else:
             return pickle.loads(value_blob)
     
+    # ========== 估值财务报表方法 ==========
+
+    async def save_valuation_financials(
+        self,
+        symbol: str,
+        fiscal_year: str,
+        report_type: str,
+        data: Dict[str, Any],
+    ) -> bool:
+        """
+        保存财务报表数据（供 DCF 模型使用）
+
+        Args:
+            symbol: 股票代码
+            fiscal_year: 财年（如 "2024"）
+            report_type: 报表类型 ("income" / "balance" / "cashflow")
+            data: 报表数据字典
+        """
+        await self._ensure_initialized()
+
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    """
+                    INSERT OR REPLACE INTO valuation_financials
+                    (symbol, fiscal_year, report_type, data, updated_at)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        symbol.upper(),
+                        fiscal_year,
+                        report_type,
+                        json.dumps(data),
+                        datetime.now().isoformat(),
+                    )
+                )
+                await db.commit()
+            return True
+
+        except Exception as e:
+            logger.error(f"保存财务报表失败: {symbol}/{fiscal_year}/{report_type}, {e}")
+            return False
+
+    async def get_valuation_financials(
+        self,
+        symbol: str,
+        report_type: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """
+        获取财务报表数据
+
+        Args:
+            symbol: 股票代码
+            report_type: 报表类型（可选，不传则返回所有类型）
+
+        Returns:
+            财务报表列表
+        """
+        await self._ensure_initialized()
+
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                if report_type:
+                    cursor = await db.execute(
+                        "SELECT * FROM valuation_financials WHERE symbol = ? AND report_type = ? ORDER BY fiscal_year DESC",
+                        (symbol.upper(), report_type)
+                    )
+                else:
+                    cursor = await db.execute(
+                        "SELECT * FROM valuation_financials WHERE symbol = ? ORDER BY fiscal_year DESC",
+                        (symbol.upper(),)
+                    )
+                rows = await cursor.fetchall()
+                results = []
+                for row in rows:
+                    d = dict(row)
+                    d["data"] = json.loads(d["data"])
+                    results.append(d)
+                return results
+
+        except Exception as e:
+            logger.error(f"获取财务报表失败: {symbol}, {e}")
+            return []
+
+    async def save_valuation_result(
+        self,
+        scan_date: datetime,
+        horizon: str,
+        universe: str,
+        result: Dict[str, Any],
+        weights: Dict[str, float],
+    ) -> bool:
+        """保存估值扫描结果"""
+        await self._ensure_initialized()
+
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                await db.execute(
+                    """
+                    INSERT INTO valuation_results
+                    (scan_date, lookback_period, universe, result_json, weights_json)
+                    VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        scan_date.isoformat(),
+                        horizon,
+                        universe,
+                        json.dumps(result),
+                        json.dumps(weights),
+                    )
+                )
+                await db.commit()
+            return True
+
+        except Exception as e:
+            logger.error(f"保存估值结果失败: {e}")
+            return False
+
+    async def get_valuation_results(
+        self,
+        limit: int = 10,
+    ) -> List[Dict[str, Any]]:
+        """获取历史估值扫描结果"""
+        await self._ensure_initialized()
+
+        try:
+            async with aiosqlite.connect(self.db_path) as db:
+                db.row_factory = aiosqlite.Row
+                cursor = await db.execute(
+                    "SELECT * FROM valuation_results ORDER BY scan_date DESC LIMIT ?",
+                    (limit,)
+                )
+                rows = await cursor.fetchall()
+                results = []
+                for row in rows:
+                    d = dict(row)
+                    d["result_json"] = json.loads(d["result_json"])
+                    d["weights_json"] = json.loads(d["weights_json"]) if d["weights_json"] else {}
+                    results.append(d)
+                return results
+
+        except Exception as e:
+            logger.error(f"获取估值结果失败: {e}")
+            return []
+
     async def __aenter__(self):
         await self._ensure_initialized()
         return self
-    
+
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         pass
-    
+
     def __repr__(self):
         return f"SQLiteCache({self.db_path})"

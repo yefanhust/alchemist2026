@@ -28,6 +28,12 @@ def pytest_configure(config):
         if config_path.is_file():
             app_config = load_config(str(config_path))
             print(f"\n[conftest] 已加载配置文件: {config_path}")
+
+            # 将 fred_api_key 注入环境变量（若未通过 env 显式设置）
+            fred_key = app_config.fred_api_key
+            if fred_key and not os.environ.get("FRED_API_KEY"):
+                os.environ["FRED_API_KEY"] = fred_key
+
             return
 
     print("\n[conftest] 未找到 config/config.yaml，使用默认配置")
