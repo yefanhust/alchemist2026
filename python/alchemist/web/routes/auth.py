@@ -4,6 +4,7 @@
 
 from fastapi import APIRouter, Request, Form
 from fastapi.responses import HTMLResponse, RedirectResponse
+from loguru import logger
 
 from web.auth import COOKIE_NAME, BAN_TIERS
 
@@ -23,6 +24,15 @@ async def login_page(request: Request):
     """渲染登录页面"""
     templates = request.app.state.templates
     auth: "AuthManager" = request.app.state.auth_manager
+
+    # 未配置密码时展示彩蛋页
+    if auth is None:
+        logger.warning(
+            "Web 认证未启用 — 请在 docker/.env 中设置 WEB_AUTH_PASSWORD 并重启服务 "
+            "(scripts/start_web.sh)"
+        )
+        return templates.TemplateResponse("easter_egg.html", {"request": request})
+
     ip = request.client.host
 
     context = {
@@ -51,6 +61,11 @@ async def login_submit(request: Request, password: str = Form(...)):
     """处理登录表单提交"""
     templates = request.app.state.templates
     auth: "AuthManager" = request.app.state.auth_manager
+
+    # 未配置密码时展示彩蛋页
+    if auth is None:
+        return templates.TemplateResponse("easter_egg.html", {"request": request})
+
     ip = request.client.host
 
     # 检查 IP 是否被封禁

@@ -46,3 +46,13 @@ async def gold_backtest_chart(request: Request):
         "charts/gold_backtest.html",
         {"request": request, "title": "黄金策略回测"}
     )
+
+
+@router.get("/chart/valuation", response_class=HTMLResponse)
+async def valuation_chart(request: Request):
+    """估值扫描页面"""
+    templates = request.app.state.templates
+    return templates.TemplateResponse(
+        "charts/valuation.html",
+        {"request": request, "title": "估值扫描"}
+    )

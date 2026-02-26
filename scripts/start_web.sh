@@ -4,6 +4,14 @@
 
 set -e
 
+# 停止已运行的 uvicorn 实例（避免端口冲突）
+EXISTING=$(pgrep -f "uvicorn web.app" 2>/dev/null || true)
+if [ -n "$EXISTING" ]; then
+    echo ">>> 检测到已运行的 Web 服务（PID: $EXISTING），正在停止..."
+    kill $EXISTING 2>/dev/null || true
+    sleep 1
+fi
+
 # 加载 .env 文件（如果存在）
 ENV_FILE="/workspace/docker/.env"
 if [ -f "$ENV_FILE" ]; then

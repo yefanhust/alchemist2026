@@ -103,13 +103,14 @@ def create_app() -> FastAPI:
         app.state.templates = Jinja2Templates(directory=templates_path)
 
     # 注册路由
-    from web.routes import health, cache, market, pages, gold_backtest, auth
+    from web.routes import health, cache, market, pages, gold_backtest, auth, valuation
 
     app.include_router(auth.router, tags=["Auth"])
     app.include_router(health.router, tags=["Health"])
     app.include_router(cache.router, prefix="/api/cache", tags=["Cache"])
     app.include_router(market.router, prefix="/api/market", tags=["Market"])
     app.include_router(gold_backtest.router, prefix="/api/gold-backtest", tags=["GoldBacktest"])
+    app.include_router(valuation.router, prefix="/api/valuation", tags=["Valuation"])
     app.include_router(pages.router, tags=["Pages"])
 
     return app

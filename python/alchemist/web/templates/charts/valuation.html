@@ -1,0 +1,898 @@
+{% extends "base.html" %}
+
+{% block head %}
+<style>
+    .grade-badge {
+        display: inline-block;
+        width: 32px;
+        height: 32px;
+        line-height: 32px;
+        text-align: center;
+        border-radius: 4px;
+        font-weight: bold;
+        color: white;
+    }
+    .grade-A { background-color: #198754; }
+    .grade-B { background-color: #20c997; }
+    .grade-C { background-color: #6c757d; }
+    .grade-D { background-color: #fd7e14; }
+    .grade-F { background-color: #dc3545; }
+    .score-bar {
+        height: 8px;
+        border-radius: 4px;
+        background: linear-gradient(to right, #198754 0%, #6c757d 50%, #dc3545 100%);
+    }
+    .score-indicator {
+        width: 4px;
+        height: 16px;
+        background: #000;
+        position: relative;
+        top: -12px;
+        border-radius: 2px;
+    }
+    .sector-cell {
+        min-width: 100px;
+        height: 40px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 4px;
+        color: white;
+        font-size: 0.85em;
+        font-weight: 500;
+    }
+    .loading-overlay {
+        position: fixed;
+        top: 0; left: 0;
+        width: 100%; height: 100%;
+        background: rgba(0,0,0,0.5);
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 9999;
+    }
+    .metric-card {
+        border-left: 3px solid;
+        padding: 0.5rem 1rem;
+    }
+    .table-valuation th { font-size: 0.85em; }
+    .table-valuation td { font-size: 0.9em; vertical-align: middle; }
+
+    /* 缓存股票列表 */
+    .stock-list-item {
+        cursor: pointer;
+        padding: 0.4rem 0.6rem;
+        border-bottom: 1px solid #eee;
+        font-size: 0.85em;
+        transition: background 0.15s;
+    }
+    .stock-list-item:hover { background: #f8f9fa; }
+    .stock-list-item.active { background: #e8f4fd; }
+    .stock-detail-panel {
+        background: #f8f9fa;
+        border-top: 1px solid #dee2e6;
+        font-size: 0.82em;
+        max-height: 500px;
+        overflow-y: auto;
+    }
+    .stock-detail-panel table td { padding: 0.15rem 0.4rem; }
+    .data-badge {
+        display: inline-block;
+        padding: 0 6px;
+        border-radius: 10px;
+        font-size: 0.75em;
+        font-weight: 500;
+    }
+    .data-badge-ok { background: #d1e7dd; color: #0f5132; }
+    .data-badge-none { background: #f8d7da; color: #842029; }
+    .cached-panel { max-height: calc(100vh - 200px); overflow-y: auto; }
+    .pagination-sm .page-link { padding: 0.2rem 0.5rem; font-size: 0.8em; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="row mb-3">
+    <div class="col">
+        <h4><i class="bi bi-search"></i> 美股估值偏离度扫描</h4>
+        <p class="text-muted mb-0">四步框架：相对估值 + DCF绝对估值 + 市场情绪 + 宏观环境</p>
+    </div>
+</div>
+
+<!-- 控制面板 -->
+<div class="row mb-3">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-body">
+                <div class="row g-3 align-items-end">
+                    <div class="col-md-2">
+                        <label class="form-label">时间窗口</label>
+                        <select id="periodSelect" class="form-select">
+                            <option value="1M">1个月</option>
+                            <option value="3M" selected>3个月</option>
+                            <option value="6M">半年</option>
+                            <option value="1Y">1年</option>
+                        </select>
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label">股票池</label>
+                        <select id="universeSelect" class="form-select">
+                            <option value="sp500" selected>S&P 500</option>
+                            <option value="nasdaq100">NASDAQ 100</option>
+                            <option value="all">全市场</option>
+                            <option value="custom">自定义</option>
+                        </select>
+                    </div>
+                    <div class="col-md-2" id="customSymbolsDiv" style="display:none">
+                        <label class="form-label">股票代码</label>
+                        <input id="customSymbols" class="form-control" placeholder="AAPL,MSFT,...">
+                    </div>
+                    <div class="col-md-1">
+                        <label class="form-label">Top N</label>
+                        <input id="topN" type="number" class="form-control" value="30" min="5" max="200">
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label">因子权重</label>
+                        <div class="d-flex gap-1">
+                            <div class="text-center" style="flex:1">
+                                <small class="d-block text-muted">相对</small>
+                                <input id="wRel" type="number" class="form-control form-control-sm" value="30" min="0" max="100" step="5">
+                            </div>
+                            <div class="text-center" style="flex:1">
+                                <small class="d-block text-muted">DCF</small>
+                                <input id="wAbs" type="number" class="form-control form-control-sm" value="25" min="0" max="100" step="5">
+                            </div>
+                            <div class="text-center" style="flex:1">
+                                <small class="d-block text-muted">情绪</small>
+                                <input id="wSent" type="number" class="form-control form-control-sm" value="25" min="0" max="100" step="5">
+                            </div>
+                            <div class="text-center" style="flex:1">
+                                <small class="d-block text-muted">宏观</small>
+                                <input id="wMacro" type="number" class="form-control form-control-sm" value="20" min="0" max="100" step="5">
+                            </div>
+                        </div>
+                    </div>
+                    <div class="col-md-2">
+                        <button id="scanBtn" class="btn btn-primary w-100" onclick="runScan()">
+                            <i class="bi bi-play-fill"></i> 开始扫描
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 数据状态 -->
+<div class="row mb-3" id="statusRow" style="display:none">
+    <div class="col-12">
+        <div class="card border-info">
+            <div class="card-body py-2">
+                <div class="row text-center" id="statusContent"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 宏观仪表盘 -->
+<div class="row mb-3" id="macroRow" style="display:none">
+    <div class="col-12">
+        <div class="card">
+            <div class="card-header py-2"><strong>宏观环境指标</strong></div>
+            <div class="card-body py-2">
+                <div class="row" id="macroContent"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 两栏布局：左边扫描结果 + 右边缓存股票列表 -->
+<div class="row">
+    <!-- 左栏：扫描结果 -->
+    <div class="col-lg-8">
+        <div id="resultsRow" style="display:none">
+            <ul class="nav nav-tabs" role="tablist">
+                <li class="nav-item">
+                    <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tabUndervalued">
+                        <i class="bi bi-arrow-down-circle text-success"></i> 最被低估
+                        <span class="badge bg-success" id="underCount">0</span>
+                    </button>
+                </li>
+                <li class="nav-item">
+                    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tabOvervalued">
+                        <i class="bi bi-arrow-up-circle text-danger"></i> 最被高估
+                        <span class="badge bg-danger" id="overCount">0</span>
+                    </button>
+                </li>
+                <li class="nav-item">
+                    <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tabSectors">
+                        <i class="bi bi-grid-3x3-gap"></i> 行业热力图
+                    </button>
+                </li>
+            </ul>
+            <div class="tab-content border border-top-0 p-3">
+                <div class="tab-pane fade show active" id="tabUndervalued">
+                    <div class="table-responsive">
+                        <table class="table table-hover table-valuation" id="underTable">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>#</th>
+                                    <th>等级</th>
+                                    <th>代码</th>
+                                    <th>公司</th>
+                                    <th>行业</th>
+                                    <th>价格</th>
+                                    <th>综合分</th>
+                                    <th>相对</th>
+                                    <th>DCF</th>
+                                    <th>情绪</th>
+                                    <th>宏观</th>
+                                    <th>安全边际</th>
+                                    <th>PE</th>
+                                    <th>RSI</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="tab-pane fade" id="tabOvervalued">
+                    <div class="table-responsive">
+                        <table class="table table-hover table-valuation" id="overTable">
+                            <thead class="table-light">
+                                <tr>
+                                    <th>#</th>
+                                    <th>等级</th>
+                                    <th>代码</th>
+                                    <th>公司</th>
+                                    <th>行业</th>
+                                    <th>价格</th>
+                                    <th>综合分</th>
+                                    <th>相对</th>
+                                    <th>DCF</th>
+                                    <th>情绪</th>
+                                    <th>宏观</th>
+                                    <th>PE</th>
+                                    <th>RSI</th>
+                                </tr>
+                            </thead>
+                            <tbody></tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="tab-pane fade" id="tabSectors">
+                    <div id="sectorChart" style="height:500px"></div>
+                </div>
+            </div>
+        </div>
+        <!-- 扫描前的提示 -->
+        <div id="scanPlaceholder">
+            <div class="card border-dashed text-center py-5">
+                <div class="card-body text-muted">
+                    <i class="bi bi-play-circle" style="font-size:3rem"></i>
+                    <p class="mt-2 mb-0">点击「开始扫描」查看估值偏离度排名</p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 右栏：缓存股票列表 -->
+    <div class="col-lg-4">
+        <div class="card">
+            <div class="card-header py-2 d-flex justify-content-between align-items-center">
+                <strong><i class="bi bi-database"></i> 缓存股票池</strong>
+                <span class="badge bg-secondary" id="cachedTotal">0</span>
+            </div>
+            <div class="card-body p-2">
+                <!-- 搜索和过滤 -->
+                <div class="row g-2 mb-2">
+                    <div class="col-7">
+                        <input id="stockSearch" class="form-control form-control-sm"
+                               placeholder="搜索代码/名称..." oninput="debouncedLoadStocks()">
+                    </div>
+                    <div class="col-5">
+                        <select id="sectorFilter" class="form-select form-select-sm"
+                                onchange="loadCachedStocks(1)">
+                            <option value="">全部行业</option>
+                        </select>
+                    </div>
+                </div>
+                <!-- 股票列表 -->
+                <div class="cached-panel" id="cachedStockList">
+                    <div class="text-center text-muted py-3">
+                        <div class="spinner-border spinner-border-sm"></div> 加载中...
+                    </div>
+                </div>
+                <!-- 分页 -->
+                <nav class="mt-2" id="stockPagination">
+                    <ul class="pagination pagination-sm justify-content-center mb-0"></ul>
+                </nav>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 股票详情弹窗（扫描结果点击） -->
+<div class="modal fade" id="stockModal" tabindex="-1">
+    <div class="modal-dialog modal-lg">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="stockModalTitle">股票详情</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="row">
+                    <div class="col-md-6" id="radarChart" style="height:300px"></div>
+                    <div class="col-md-6" id="dcfChart" style="height:300px"></div>
+                </div>
+                <div class="row mt-3" id="stockMetrics"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 缓存数据详情弹窗 -->
+<div class="modal fade" id="cacheDetailModal" tabindex="-1">
+    <div class="modal-dialog modal-xl">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title" id="cacheDetailTitle">缓存数据详情</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body" id="cacheDetailBody">
+                <div class="text-center py-4">
+                    <div class="spinner-border"></div>
+                    <p class="mt-2">加载数据中...</p>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 加载遮罩 -->
+<div id="loadingOverlay" class="loading-overlay" style="display:none">
+    <div class="text-center text-white">
+        <div class="spinner-border spinner-border-lg mb-3" style="width:3rem;height:3rem"></div>
+        <h5>正在扫描估值...</h5>
+        <p class="text-muted" id="loadingText">计算多因子评分中</p>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+const API_BASE = '/api/valuation';
+let cachedStocksState = { page: 1, perPage: 50, total: 0, totalPages: 0 };
+
+// ==================== 控制面板 ====================
+
+document.getElementById('universeSelect').addEventListener('change', function() {
+    document.getElementById('customSymbolsDiv').style.display =
+        this.value === 'custom' ? '' : 'none';
+    loadDataStatus();
+});
+
+// 加载数据状态
+async function loadDataStatus() {
+    const universe = document.getElementById('universeSelect').value;
+    try {
+        const resp = await fetch(`${API_BASE}/data-status?universe=${universe}`);
+        const data = await resp.json();
+        const row = document.getElementById('statusRow');
+        row.style.display = '';
+        document.getElementById('statusContent').innerHTML = `
+            <div class="col"><strong>${data.total}</strong><br><small class="text-muted">股票池</small></div>
+            <div class="col"><strong>${data.with_overview}</strong><br><small class="text-muted">有基本面</small></div>
+            <div class="col"><strong>${data.with_financials}</strong><br><small class="text-muted">有财报</small></div>
+            <div class="col"><strong>${data.coverage_pct}%</strong><br><small class="text-muted"
+                data-bs-toggle="tooltip" data-bs-html="true" data-bs-placement="bottom"
+                data-bs-title="<b>覆盖率</b> = 有基本面(${data.with_overview}) &divide; 股票池(${data.total}) &times; 100%<br><br><b>判断标准</b>：stock_info 表中 pe_ratio 字段非空<br><b>财报覆盖率</b>：${data.financials_pct}%"
+                style="cursor:help; border-bottom:1px dashed #6c757d">覆盖率</small></div>
+        `;
+        // 初始化 Bootstrap tooltip
+        document.querySelectorAll('[data-bs-toggle="tooltip"]').forEach(
+            el => new bootstrap.Tooltip(el)
+        );
+    } catch(e) {
+        console.error('加载状态失败', e);
+    }
+}
+
+// ==================== 扫描功能 ====================
+
+async function runScan() {
+    const btn = document.getElementById('scanBtn');
+    btn.disabled = true;
+    document.getElementById('loadingOverlay').style.display = '';
+
+    const wRel = parseInt(document.getElementById('wRel').value);
+    const wAbs = parseInt(document.getElementById('wAbs').value);
+    const wSent = parseInt(document.getElementById('wSent').value);
+    const wMacro = parseInt(document.getElementById('wMacro').value);
+    const total = wRel + wAbs + wSent + wMacro;
+
+    const body = {
+        horizon: document.getElementById('periodSelect').value,
+        universe: document.getElementById('universeSelect').value,
+        top_n: parseInt(document.getElementById('topN').value),
+        weights: {
+            relative: wRel / total,
+            absolute: wAbs / total,
+            sentiment: wSent / total,
+            macro: wMacro / total,
+        }
+    };
+
+    if (body.universe === 'custom') {
+        const syms = document.getElementById('customSymbols').value;
+        body.custom_symbols = syms.split(',').map(s => s.trim()).filter(s => s);
+    }
+
+    try {
+        const resp = await fetch(`${API_BASE}/scan`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(body),
+        });
+        const data = await resp.json();
+        renderResults(data);
+    } catch(e) {
+        alert('扫描失败: ' + e.message);
+    } finally {
+        btn.disabled = false;
+        document.getElementById('loadingOverlay').style.display = 'none';
+    }
+}
+
+function renderResults(data) {
+    document.getElementById('resultsRow').style.display = '';
+    document.getElementById('scanPlaceholder').style.display = 'none';
+
+    renderTable('underTable', data.most_undervalued, true);
+    document.getElementById('underCount').textContent = data.most_undervalued.length;
+
+    renderTable('overTable', data.most_overvalued, false);
+    document.getElementById('overCount').textContent = data.most_overvalued.length;
+
+    renderMacro(data.macro_context);
+    renderSectorChart(data.sector_summary);
+}
+
+function renderTable(tableId, stocks, showMargin) {
+    const tbody = document.querySelector(`#${tableId} tbody`);
+    tbody.innerHTML = '';
+    stocks.forEach((s, i) => {
+        const row = document.createElement('tr');
+        row.style.cursor = 'pointer';
+        row.onclick = () => showStockDetail(s);
+
+        const marginCol = showMargin
+            ? `<td>${s.safety_margin !== null ? (s.safety_margin * 100).toFixed(1) + '%' : '-'}</td>`
+            : '';
+
+        row.innerHTML = `
+            <td>${i + 1}</td>
+            <td><span class="grade-badge grade-${s.grade}">${s.grade}</span></td>
+            <td><strong>${s.symbol}</strong></td>
+            <td class="text-truncate" style="max-width:150px" title="${s.name}">${s.name}</td>
+            <td><small>${s.sector || '-'}</small></td>
+            <td>$${s.current_price.toFixed(2)}</td>
+            <td><strong>${s.composite_score.toFixed(3)}</strong></td>
+            <td>${s.relative_score.toFixed(2)}</td>
+            <td>${s.absolute_score.toFixed(2)}</td>
+            <td>${s.sentiment_score.toFixed(2)}</td>
+            <td>${s.macro_score.toFixed(2)}</td>
+            ${marginCol}
+            <td>${s.key_metrics.pe_ratio ? s.key_metrics.pe_ratio.toFixed(1) : '-'}</td>
+            <td>${s.key_metrics.rsi ? s.key_metrics.rsi.toFixed(0) : '-'}</td>
+        `;
+        tbody.appendChild(row);
+    });
+}
+
+function renderMacro(ctx) {
+    if (!ctx || Object.keys(ctx).length === 0) return;
+    const row = document.getElementById('macroRow');
+    row.style.display = '';
+    const labels = {
+        treasury_10y: '10Y国债',
+        vix: 'VIX',
+        rule_of_20_sum: '20法则',
+        earnings_yield: '盈利收益率',
+    };
+    let html = '';
+    for (const [k, v] of Object.entries(ctx)) {
+        if (v !== null && v !== undefined && labels[k]) {
+            html += `<div class="col-auto"><div class="metric-card border-info">
+                <small class="text-muted">${labels[k]}</small><br>
+                <strong>${typeof v === 'number' ? v.toFixed(2) : v}</strong>
+            </div></div>`;
+        }
+    }
+    document.getElementById('macroContent').innerHTML = html;
+}
+
+function renderSectorChart(summary) {
+    if (!summary || Object.keys(summary).length === 0) return;
+    const sectors = Object.keys(summary);
+    const scores = sectors.map(s => summary[s].avg_score);
+    const counts = sectors.map(s => summary[s].count);
+    const colors = scores.map(s => s < -0.15 ? '#198754' : s > 0.15 ? '#dc3545' : '#6c757d');
+
+    Plotly.newPlot('sectorChart', [{
+        type: 'bar',
+        x: sectors,
+        y: scores,
+        text: counts.map(c => `${c}只`),
+        textposition: 'outside',
+        marker: { color: colors },
+    }], {
+        title: '行业平均估值偏离度',
+        yaxis: { title: '平均分 (-1低估 ~ +1高估)', range: [-1, 1] },
+        xaxis: { tickangle: -45 },
+        margin: { b: 120 },
+    }, { responsive: true });
+}
+
+function showStockDetail(stock) {
+    document.getElementById('stockModalTitle').textContent =
+        `${stock.symbol} - ${stock.name} (${stock.grade})`;
+
+    Plotly.newPlot('radarChart', [{
+        type: 'scatterpolar',
+        r: [stock.relative_score, stock.absolute_score, stock.sentiment_score, stock.macro_score, stock.relative_score],
+        theta: ['相对估值', '绝对估值(DCF)', '市场情绪', '宏观环境', '相对估值'],
+        fill: 'toself',
+        fillcolor: 'rgba(25,135,84,0.2)',
+        line: { color: '#198754' },
+    }], {
+        polar: { radialaxis: { range: [-1, 1] } },
+        title: '四维因子分布',
+        margin: { t: 40, b: 20, l: 40, r: 40 },
+        showlegend: false,
+    }, { responsive: true });
+
+    const dcf = stock.dcf_intrinsic_values || {};
+    if (dcf.neutral || dcf.optimistic || dcf.pessimistic) {
+        Plotly.newPlot('dcfChart', [{
+            type: 'bar',
+            x: ['悲观', '中性', '乐观', '当前价'],
+            y: [dcf.pessimistic || 0, dcf.neutral || 0, dcf.optimistic || 0, stock.current_price],
+            marker: { color: ['#fd7e14', '#6c757d', '#198754', '#0d6efd'] },
+        }], {
+            title: 'DCF 内在价值 vs 当前价',
+            yaxis: { title: '每股价值 ($)' },
+            margin: { t: 40, b: 30, l: 50, r: 20 },
+        }, { responsive: true });
+    }
+
+    const m = stock.key_metrics;
+    let metricsHtml = '<div class="col-12"><table class="table table-sm"><tbody>';
+    const metricLabels = {
+        pe_ratio: 'P/E', pb_ratio: 'P/B', ps_ratio: 'P/S',
+        peg_ratio: 'PEG', ev_to_ebitda: 'EV/EBITDA',
+        rsi: 'RSI', short_percent: '空头比例', short_ratio: '空头回补天数',
+        insider_net_direction: '内部人方向', momentum_return: '动量收益率',
+        fcf_growth_rate: 'FCF增长率', wacc: 'WACC',
+    };
+    for (const [k, label] of Object.entries(metricLabels)) {
+        if (m[k] !== undefined && m[k] !== null) {
+            let val = typeof m[k] === 'number' ? m[k].toFixed(3) : m[k];
+            metricsHtml += `<tr><td class="text-muted">${label}</td><td><strong>${val}</strong></td></tr>`;
+        }
+    }
+    metricsHtml += '</tbody></table></div>';
+    document.getElementById('stockMetrics').innerHTML = metricsHtml;
+
+    new bootstrap.Modal(document.getElementById('stockModal')).show();
+}
+
+// ==================== 缓存股票列表 ====================
+
+let searchTimer = null;
+function debouncedLoadStocks() {
+    clearTimeout(searchTimer);
+    searchTimer = setTimeout(() => loadCachedStocks(1), 300);
+}
+
+async function loadCachedStocks(page) {
+    cachedStocksState.page = page || 1;
+    const search = document.getElementById('stockSearch').value;
+    const sector = document.getElementById('sectorFilter').value;
+    const params = new URLSearchParams({
+        page: cachedStocksState.page,
+        per_page: cachedStocksState.perPage,
+        search: search,
+        sector: sector,
+    });
+
+    try {
+        const resp = await fetch(`${API_BASE}/cached-stocks?${params}`);
+        const data = await resp.json();
+        cachedStocksState.total = data.total;
+        cachedStocksState.totalPages = data.total_pages;
+
+        document.getElementById('cachedTotal').textContent = data.total;
+        renderCachedStockList(data.stocks);
+        renderStockPagination();
+        populateSectorFilter(data.sectors);
+    } catch(e) {
+        console.error('加载缓存股票失败', e);
+        document.getElementById('cachedStockList').innerHTML =
+            '<div class="text-center text-danger py-3">加载失败</div>';
+    }
+}
+
+function renderCachedStockList(stocks) {
+    const container = document.getElementById('cachedStockList');
+    if (!stocks || stocks.length === 0) {
+        container.innerHTML = '<div class="text-center text-muted py-3">无数据</div>';
+        return;
+    }
+
+    let html = '';
+    stocks.forEach(s => {
+        const mcap = s.market_cap ? formatMarketCap(s.market_cap) : '-';
+        const pe = s.pe_ratio ? s.pe_ratio.toFixed(1) : '-';
+        const ohlcvTip = s.ohlcv_count > 0
+            ? `market_data 表中有 ${s.ohlcv_count} 条日线记录`
+            : '未采集 OHLCV 行情数据';
+        const ohlcvBadge = s.ohlcv_count > 0
+            ? `<span class="data-badge data-badge-ok" title="${ohlcvTip}">${s.ohlcv_count}条</span>`
+            : `<span class="data-badge data-badge-none" title="${ohlcvTip}">无</span>`;
+        const finTypes = [];
+        if (s.financials_types >= 1) finTypes.push('income(利润表)');
+        if (s.financials_types >= 2) finTypes.push('balance(资产负债表)');
+        if (s.financials_types >= 3) finTypes.push('cashflow(现金流量表)');
+        const finTip = s.financials_types > 0
+            ? `已采集 ${s.financials_types} 种财报：${finTypes.join('、')}`
+            : '未采集财务报表数据';
+        const finBadge = s.financials_types > 0
+            ? `<span class="data-badge data-badge-ok" title="${finTip}">${s.financials_types}种</span>`
+            : `<span class="data-badge data-badge-none" title="${finTip}">无</span>`;
+
+        html += `
+            <div class="stock-list-item" onclick="showCachedStockDetail('${s.symbol}')">
+                <div class="d-flex justify-content-between align-items-center">
+                    <div>
+                        <strong>${s.symbol}</strong>
+                        <small class="text-muted ms-1">${(s.name || '').substring(0, 18)}</small>
+                    </div>
+                    <div>
+                        <small class="text-muted me-2">PE ${pe}</small>
+                        <small class="text-muted">${mcap}</small>
+                    </div>
+                </div>
+                <div class="d-flex justify-content-between mt-1">
+                    <small class="text-muted">${s.sector || '-'}</small>
+                    <div>
+                        <small class="text-muted me-1">OHLCV</small>${ohlcvBadge}
+                        <small class="text-muted ms-2 me-1">财报</small>${finBadge}
+                    </div>
+                </div>
+            </div>`;
+    });
+    container.innerHTML = html;
+}
+
+function renderStockPagination() {
+    const ul = document.querySelector('#stockPagination ul');
+    const { page, totalPages } = cachedStocksState;
+    if (totalPages <= 1) { ul.innerHTML = ''; return; }
+
+    let html = '';
+    // 上一页
+    html += `<li class="page-item ${page <= 1 ? 'disabled' : ''}">
+        <a class="page-link" href="#" onclick="event.preventDefault();loadCachedStocks(${page - 1})">&laquo;</a></li>`;
+
+    // 页码（最多显示 5 页）
+    let startPage = Math.max(1, page - 2);
+    let endPage = Math.min(totalPages, startPage + 4);
+    if (endPage - startPage < 4) startPage = Math.max(1, endPage - 4);
+
+    if (startPage > 1) {
+        html += `<li class="page-item"><a class="page-link" href="#" onclick="event.preventDefault();loadCachedStocks(1)">1</a></li>`;
+        if (startPage > 2) html += '<li class="page-item disabled"><span class="page-link">...</span></li>';
+    }
+
+    for (let i = startPage; i <= endPage; i++) {
+        html += `<li class="page-item ${i === page ? 'active' : ''}">
+            <a class="page-link" href="#" onclick="event.preventDefault();loadCachedStocks(${i})">${i}</a></li>`;
+    }
+
+    if (endPage < totalPages) {
+        if (endPage < totalPages - 1) html += '<li class="page-item disabled"><span class="page-link">...</span></li>';
+        html += `<li class="page-item"><a class="page-link" href="#" onclick="event.preventDefault();loadCachedStocks(${totalPages})">${totalPages}</a></li>`;
+    }
+
+    // 下一页
+    html += `<li class="page-item ${page >= totalPages ? 'disabled' : ''}">
+        <a class="page-link" href="#" onclick="event.preventDefault();loadCachedStocks(${page + 1})">&raquo;</a></li>`;
+
+    ul.innerHTML = html;
+}
+
+function populateSectorFilter(sectors) {
+    const select = document.getElementById('sectorFilter');
+    const current = select.value;
+    // 只在选项为空时填充（避免每次重置）
+    if (select.options.length <= 1) {
+        sectors.forEach(s => {
+            const opt = document.createElement('option');
+            opt.value = s;
+            opt.textContent = s;
+            select.appendChild(opt);
+        });
+    }
+    select.value = current;
+}
+
+function formatMarketCap(val) {
+    if (!val) return '-';
+    if (val >= 1e12) return (val / 1e12).toFixed(1) + 'T';
+    if (val >= 1e9) return (val / 1e9).toFixed(1) + 'B';
+    if (val >= 1e6) return (val / 1e6).toFixed(0) + 'M';
+    return val.toFixed(0);
+}
+
+// ==================== 缓存数据详情弹窗 ====================
+
+async function showCachedStockDetail(symbol) {
+    const modal = new bootstrap.Modal(document.getElementById('cacheDetailModal'));
+    document.getElementById('cacheDetailTitle').textContent = `${symbol} - 缓存数据详情`;
+    document.getElementById('cacheDetailBody').innerHTML =
+        '<div class="text-center py-4"><div class="spinner-border"></div><p class="mt-2">加载数据中...</p></div>';
+    modal.show();
+
+    try {
+        const resp = await fetch(`${API_BASE}/cached-stock/${symbol}`);
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        renderCacheDetail(data);
+    } catch(e) {
+        document.getElementById('cacheDetailBody').innerHTML =
+            `<div class="alert alert-danger">加载失败: ${e.message}</div>`;
+    }
+}
+
+function renderCacheDetail(data) {
+    const body = document.getElementById('cacheDetailBody');
+    let html = '';
+
+    // Overview 基本面
+    html += '<h6><i class="bi bi-info-circle"></i> 基本面数据 (Overview)</h6>';
+    if (data.overview) {
+        const ov = data.overview;
+        html += '<div class="row mb-3">';
+        const overviewFields = [
+            ['名称', ov.name], ['交易所', ov.exchange], ['行业', ov.sector],
+            ['细分行业', ov.industry], ['国家', ov.country],
+            ['市值', ov.market_cap ? formatMarketCap(ov.market_cap) : '-'],
+            ['P/E', fmtNum(ov.pe_ratio)], ['Forward P/E', fmtNum(ov.forward_pe)],
+            ['P/B', fmtNum(ov.pb_ratio)], ['P/S', fmtNum(ov.ps_ratio)],
+            ['PEG', fmtNum(ov.peg_ratio)], ['EV/EBITDA', fmtNum(ov.ev_to_ebitda)],
+            ['EPS', fmtNum(ov.eps)], ['Beta', fmtNum(ov.beta)],
+            ['52周高', fmtNum(ov.high_52week)], ['52周低', fmtNum(ov.low_52week)],
+            ['利润率', fmtPct(ov.profit_margin)], ['ROE', fmtPct(ov.return_on_equity)],
+            ['股息率', fmtPct(ov.dividend_yield)], ['流通股', ov.shares_outstanding ? formatMarketCap(ov.shares_outstanding) : '-'],
+        ];
+        html += '<div class="col-12"><table class="table table-sm table-bordered"><tbody>';
+        for (let i = 0; i < overviewFields.length; i += 4) {
+            html += '<tr>';
+            for (let j = i; j < Math.min(i + 4, overviewFields.length); j++) {
+                html += `<td class="text-muted" style="width:12%">${overviewFields[j][0]}</td>
+                         <td style="width:13%"><strong>${overviewFields[j][1] || '-'}</strong></td>`;
+            }
+            // 补齐空列
+            for (let j = overviewFields.length; j < i + 4; j++) {
+                html += '<td></td><td></td>';
+            }
+            html += '</tr>';
+        }
+        html += '</tbody></table></div>';
+        if (ov.description) {
+            html += `<div class="col-12"><small class="text-muted">${ov.description.substring(0, 300)}${ov.description.length > 300 ? '...' : ''}</small></div>`;
+        }
+        html += '</div>';
+    } else {
+        html += '<div class="alert alert-secondary py-1">无基本面数据</div>';
+    }
+
+    // OHLCV 摘要
+    html += '<h6><i class="bi bi-graph-up"></i> OHLCV 行情数据</h6>';
+    if (data.ohlcv_summary) {
+        const os = data.ohlcv_summary;
+        html += `<div class="row mb-3"><div class="col-12">
+            <table class="table table-sm table-bordered"><tbody>
+                <tr>
+                    <td class="text-muted">数据条数</td><td><strong>${os.count}</strong></td>
+                    <td class="text-muted">起始日期</td><td><strong>${os.start_date || '-'}</strong></td>
+                    <td class="text-muted">结束日期</td><td><strong>${os.end_date || '-'}</strong></td>
+                    <td class="text-muted">最新收盘</td><td><strong>${os.latest_close ? '$' + os.latest_close.toFixed(2) : '-'}</strong></td>
+                    <td class="text-muted">最新成交量</td><td><strong>${os.latest_volume ? formatMarketCap(os.latest_volume) : '-'}</strong></td>
+                </tr>
+            </tbody></table>
+        </div></div>`;
+    } else {
+        html += '<div class="alert alert-secondary py-1">无 OHLCV 数据</div>';
+    }
+
+    // 财务报表
+    html += '<h6><i class="bi bi-file-earmark-spreadsheet"></i> 财务报表</h6>';
+    const reportLabels = { income: '利润表 (Income)', balance: '资产负债表 (Balance)', cashflow: '现金流量表 (Cashflow)' };
+    if (data.financials && Object.keys(data.financials).length > 0) {
+        html += '<ul class="nav nav-pills nav-fill mb-2" role="tablist">';
+        let first = true;
+        for (const [rtype, label] of Object.entries(reportLabels)) {
+            if (!data.financials[rtype]) continue;
+            html += `<li class="nav-item"><button class="nav-link ${first ? 'active' : ''}" data-bs-toggle="pill"
+                data-bs-target="#fin_${rtype}">${label} (${data.financials[rtype].length})</button></li>`;
+            first = false;
+        }
+        html += '</ul><div class="tab-content">';
+
+        first = true;
+        for (const [rtype, reports] of Object.entries(data.financials)) {
+            html += `<div class="tab-pane fade ${first ? 'show active' : ''}" id="fin_${rtype}">`;
+            html += '<div class="table-responsive" style="max-height:350px;overflow-y:auto">';
+            html += '<table class="table table-sm table-striped"><thead class="table-light sticky-top"><tr><th>指标</th>';
+
+            // 年份列头
+            reports.forEach(r => { html += `<th>${r.fiscal_year}</th>`; });
+            html += '</tr></thead><tbody>';
+
+            // 收集所有指标键
+            const allKeys = new Set();
+            reports.forEach(r => {
+                if (r.data && typeof r.data === 'object') {
+                    Object.keys(r.data).forEach(k => allKeys.add(k));
+                }
+            });
+
+            allKeys.forEach(key => {
+                // 跳过 fiscalDateEnding 等元信息
+                if (key === 'fiscalDateEnding' || key === 'reportedCurrency') return;
+                html += `<tr><td class="text-muted text-nowrap">${key}</td>`;
+                reports.forEach(r => {
+                    const val = r.data ? r.data[key] : null;
+                    html += `<td>${formatFinancialValue(val)}</td>`;
+                });
+                html += '</tr>';
+            });
+
+            html += '</tbody></table></div></div>';
+            first = false;
+        }
+        html += '</div>';
+    } else {
+        html += '<div class="alert alert-secondary py-1">无财报数据</div>';
+    }
+
+    body.innerHTML = html;
+}
+
+function fmtNum(v) {
+    if (v === null || v === undefined) return '-';
+    return typeof v === 'number' ? v.toFixed(2) : v;
+}
+
+function fmtPct(v) {
+    if (v === null || v === undefined) return '-';
+    return typeof v === 'number' ? (v * 100).toFixed(2) + '%' : v;
+}
+
+function formatFinancialValue(val) {
+    if (val === null || val === undefined || val === 'None') return '-';
+    const num = parseFloat(val);
+    if (isNaN(num)) return val;
+    if (Math.abs(num) >= 1e9) return (num / 1e9).toFixed(2) + 'B';
+    if (Math.abs(num) >= 1e6) return (num / 1e6).toFixed(2) + 'M';
+    if (Math.abs(num) >= 1e3) return (num / 1e3).toFixed(1) + 'K';
+    return num.toFixed(2);
+}
+
+// ==================== 初始化 ====================
+
+loadDataStatus();
+loadCachedStocks(1);
+</script>
+{% endblock %}
